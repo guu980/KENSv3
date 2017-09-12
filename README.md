@@ -2,5 +2,8 @@
 KAIST CS341 KENS Project
 
 ## Writers
-* Minkyu Jo (KAIST SoC)
-* Joonhyung Shin (KAIST MathSci)
+[ANLAB KAIST](https://github.com/ANLAB-KAIST/KENSv3)
+
+## Project Team Members
+* Minkyu Jo (KAIST SoC '16)
+* Joonhyung Shin (KAIST MathSci '15)
