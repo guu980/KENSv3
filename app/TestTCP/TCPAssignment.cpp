@@ -32,6 +32,7 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 {
 	fd_set.clear();
 	fd_info.clear();
+	fd_info_raw.clear();
 	for(int i = 0; i<MAX_PORT_NUM; i++)
 	{
 		ip_set[i].clear();
