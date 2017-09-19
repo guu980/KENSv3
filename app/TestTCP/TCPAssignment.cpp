@@ -137,25 +137,20 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	fd_set.erase(it1);
 
 	auto it2 = fd_info.find(fd);
-	if(it2 == fd_info.end())
+	if(it2 != fd_info.end())
 	{
-		this->removeFileDescriptor(pid, fd);
-		this->returnSystemCall(syscallUUID, 0);
-		return;
+		uint32_t ip;
+		unsigned short int port;
+
+		std::tie(ip, port) = it2->second;
+		fd_info.erase(it2);
+		fd_info_raw.erase(fd);
+
+		if(ip == INADDR_ANY)
+			is_addr_any[port] = false;
+		else
+			ip_set[port].erase(ip);
 	}
-
-	uint32_t ip;
-	unsigned short int port;
-
-	std::tie(ip, port) = it2->second;
-	fd_info.erase(it2);
-
-	fd_info_raw.erase(fd);
-
-	if(ip == INADDR_ANY)
-		is_addr_any[port] = false;
-	else
-		ip_set[port].erase(ip);
 
 	this->removeFileDescriptor(pid, fd);
 	this->returnSystemCall(syscallUUID, 0);
@@ -185,21 +180,16 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 		}
 
 		is_addr_any[port] = true;
-
-		fd_info[sockfd] = {ip, port};
-		fd_info_raw[sockfd] = {*addr, addrlen};
-		this->returnSystemCall(syscallUUID, 0);
-		return;
 	}
-
-	if(is_addr_any[port] || !ip_set[port].insert(ip).second)
-		this->returnSystemCall(syscallUUID, -1);
-	else
+	else if(is_addr_any[port] || !ip_set[port].insert(ip).second)
 	{
-		fd_info[sockfd] = {ip, port};
-		fd_info_raw[sockfd] = {*addr, addrlen};
-		this->returnSystemCall(syscallUUID, 0);
+		this->returnSystemCall(syscallUUID, -1);
+		return 0;
 	}
+	
+	fd_info[sockfd] = { ip, port };
+	fd_info_raw[sockfd] = { *addr, addrlen };
+	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, 
