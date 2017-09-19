@@ -116,7 +116,7 @@ void TCPAssignment::timerCallback(void* payload)
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, 
 		int domain, int protocol)
 {
-	//assert(domain == AF_INET && protocol && IPPROTO_TCP);
+	//assert(domain == AF_INET && protocol == IPPROTO_TCP);
 	int fd = this->createFileDescriptor(pid);
 
 	if(fd != -1)
