@@ -184,9 +184,9 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	else if(is_addr_any[port] || !ip_set[port].insert(ip).second)
 	{
 		this->returnSystemCall(syscallUUID, -1);
-		return 0;
+		return;
 	}
-	
+
 	fd_info[sockfd] = { ip, port };
 	fd_info_raw[sockfd] = { *addr, addrlen };
 	this->returnSystemCall(syscallUUID, 0);
