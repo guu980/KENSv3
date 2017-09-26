@@ -55,6 +55,15 @@ public:
 	void syscall_getsockname(UUID syscallUUID, int pid, 
 		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 
+	void syscall_accept(UUID syscallUUID, int pid,
+		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+	void syscall_connect(UUID syscallUUID, int pid,
+		int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+	void syscall_getpeername(UUID syscallUUID, int pid,
+		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+	void syscall_listen(UUID syscallUUID, int pid,
+		int sockfd, int backlog);
+
 
 protected:
 	virtual void systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param) final;

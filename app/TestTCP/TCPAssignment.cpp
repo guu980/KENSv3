@@ -72,16 +72,16 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		//this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
 		break;
 	case CONNECT:
-		//this->syscall_connect(syscallUUID, pid, param.param1_int,
-		//		static_cast<struct sockaddr*>(param.param2_ptr), (socklen_t)param.param3_int);
+		this->syscall_connect(syscallUUID, pid, param.param1_int,
+				static_cast<struct sockaddr*>(param.param2_ptr), (socklen_t)param.param3_int);
 		break;
 	case LISTEN:
-		//this->syscall_listen(syscallUUID, pid, param.param1_int, param.param2_int);
+		this->syscall_listen(syscallUUID, pid, param.param1_int, param.param2_int);
 		break;
 	case ACCEPT:
-		//this->syscall_accept(syscallUUID, pid, param.param1_int,
-		//		static_cast<struct sockaddr*>(param.param2_ptr),
-		//		static_cast<socklen_t*>(param.param3_ptr));
+		this->syscall_accept(syscallUUID, pid, param.param1_int,
+				static_cast<struct sockaddr*>(param.param2_ptr),
+				static_cast<socklen_t*>(param.param3_ptr));
 		break;
 	case BIND:
 		this->syscall_bind(syscallUUID, pid, param.param1_int,
@@ -94,9 +94,9 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 				static_cast<socklen_t*>(param.param3_ptr));
 		break;
 	case GETPEERNAME:
-		//this->syscall_getpeername(syscallUUID, pid, param.param1_int,
-		//		static_cast<struct sockaddr *>(param.param2_ptr),
-		//		static_cast<socklen_t*>(param.param3_ptr));
+		this->syscall_getpeername(syscallUUID, pid, param.param1_int,
+				static_cast<struct sockaddr *>(param.param2_ptr),
+				static_cast<socklen_t*>(param.param3_ptr));
 		break;
 	default:
 		assert(0);
@@ -125,6 +125,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 	this->returnSystemCall(syscallUUID, fd);
 }
 
+/* Need to be updated */
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, 
 	int fd)
 {
@@ -208,5 +209,28 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	this->returnSystemCall(syscallUUID, 0);
 }
 
+void syscall_accept(UUID syscallUUID, int pid,
+	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+{
+	
+}
+
+void syscall_connect(UUID syscallUUID, int pid,
+	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
+{
+	
+}
+
+void syscall_getpeername(UUID syscallUUID, int pid,
+	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+{
+	
+}
+
+void syscall_listen(UUID syscallUUID, int pid,
+	int sockfd, int backlog)
+{
+	
+}
 
 }
