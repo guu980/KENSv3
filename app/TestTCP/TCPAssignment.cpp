@@ -209,25 +209,25 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	this->returnSystemCall(syscallUUID, 0);
 }
 
-void syscall_accept(UUID syscallUUID, int pid,
+void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
 	
 }
 
-void syscall_connect(UUID syscallUUID, int pid,
+void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
 	
 }
 
-void syscall_getpeername(UUID syscallUUID, int pid,
+void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
 	
 }
 
-void syscall_listen(UUID syscallUUID, int pid,
+void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
 	
