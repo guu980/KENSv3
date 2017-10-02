@@ -20,7 +20,8 @@
 #include <E/E_TimerModule.hpp>
 
 #include <set>
-#include <map>
+#include <unordered_map>
+#include <queue>
 
 namespace E
 {
@@ -33,11 +34,27 @@ private:
 	virtual void timerCallback(void* payload) final;
 
 	const static int MAX_PORT_NUM = 65536;
-	std::set<int> fd_set;
 	std::set<uint32_t> ip_set[MAX_PORT_NUM];
 	bool is_addr_any[MAX_PORT_NUM];
-	std::map<int, std::pair<uint32_t, unsigned short int>> fd_info;
-	std::map<int, std::pair<struct sockaddr, socklen_t>> fd_info_raw;
+	struct proc_entry {
+		std::set<int> fd_set;
+		std::unordered_map<int, std::pair<uint32_t, unsigned short int>> fd_info;
+		std::unordered_map<int, std::pair<struct sockaddr, socklen_t>> fd_info_raw;
+
+		struct blocked_accept {
+			UUID syscallUUID;
+			// Wait...
+		};
+
+		struct blocked_connect {
+			UUID syscallUUID;
+			// Wait...
+		};
+
+		std::queue<blocked_accept> accept_queue;
+		std::queue<blocked_connect> connect_queue;
+	};
+	std::unordered_map<int, struct proc_entry> proc_table;
 
 public:
 	TCPAssignment(Host* host);

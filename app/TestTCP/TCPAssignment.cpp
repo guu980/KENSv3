@@ -30,9 +30,7 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 		NetworkLog(host->getNetworkSystem()),
 		TimerModule(host->getSystem())
 {
-	fd_set.clear();
-	fd_info.clear();
-	fd_info_raw.clear();
+	proc_table.clear();
 	for(int i = 0; i<MAX_PORT_NUM; i++)
 	{
 		ip_set[i].clear();
@@ -120,7 +118,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 	int fd = this->createFileDescriptor(pid);
 
 	if(fd != -1)
-		fd_set.insert(fd);
+		proc_table[pid].fd_set.insert(fd);
 
 	this->returnSystemCall(syscallUUID, fd);
 }
@@ -129,6 +127,17 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, 
 	int fd)
 {
+	auto it0 = proc_table.find(pid);
+	if (it0 == proc_table.end())
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &pe = it0->second;
+	auto &fd_set = pe.fd_set;
+	auto &fd_info = pe.fd_info;
+	auto &fd_info_raw = pe.fd_info_raw;
+
 	auto it1 = fd_set.find(fd);
 	if(it1 == fd_set.end())
 	{
@@ -160,6 +169,17 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, 
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
+	auto it0 = proc_table.find(pid);
+	if (it0 == proc_table.end())
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &pe = it0->second;
+	auto &fd_set = pe.fd_set;
+	auto &fd_info = pe.fd_info;
+	auto &fd_info_raw = pe.fd_info_raw;
+
 	if(fd_set.find(sockfd) == fd_set.end() || fd_info_raw.find(sockfd) != fd_info_raw.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
@@ -196,6 +216,15 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, 
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
+	auto it0 = proc_table.find(pid);
+	if (it0 == proc_table.end())
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &pe = it0->second;
+	auto &fd_info_raw = pe.fd_info_raw;
+
 	auto it = fd_info_raw.find(sockfd);
 	if(it == fd_info_raw.end())
 	{
