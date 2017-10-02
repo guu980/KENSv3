@@ -14,8 +14,6 @@
 #include <E/Networking/E_NetworkUtil.hpp>
 #include "TCPAssignment.hpp"
 
-#include <set>
-#include <map>
 #include <tuple>
 #include <cstdio>
 
