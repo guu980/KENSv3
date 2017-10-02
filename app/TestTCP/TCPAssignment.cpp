@@ -255,9 +255,9 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 }
 
 
-std::pair<TCPAssignment::ip_t, TCPAssignment::port_t> TCPAssignment::addr_ip_port(const struct sockaddr addr)
+std::pair<TCPAssignment::ip_t, TCPAssignment::port_t> TCPAssignment::addr_ip_port(const sockaddr addr)
 {
-	return { ((struct sockaddr_in *)(&addr))->sin_addr.s_addr, ((struct sockaddr_in *)(&addr))->sin_port };
+	return { ((sockaddr_in *)(&addr))->sin_addr.s_addr, ((sockaddr_in *)(&addr))->sin_port };
 }
 
 

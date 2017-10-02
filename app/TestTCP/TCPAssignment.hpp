@@ -40,7 +40,7 @@ private:
 
 	struct proc_entry {
 		std::unordered_set<int> fd_set;
-		std::unordered_map<int, std::pair<struct sockaddr, socklen_t>> fd_info;
+		std::unordered_map<int, std::pair<sockaddr, socklen_t>> fd_info;
 
 		struct blocked_accept {
 			UUID syscallUUID;
@@ -58,9 +58,9 @@ private:
 	
 	std::unordered_set<ip_t> ip_set[MAX_PORT_NUM];
 	bool is_addr_any[MAX_PORT_NUM];
-	std::unordered_map<int, struct proc_entry> proc_table;
+	std::unordered_map<int, proc_entry> proc_table;
 
-	std::pair<ip_t, port_t> addr_ip_port(const struct sockaddr addr);
+	std::pair<ip_t, port_t> addr_ip_port(const sockaddr addr);
 
 public:
 	TCPAssignment(Host* host);
