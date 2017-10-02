@@ -33,13 +33,14 @@ private:
 private:
 	virtual void timerCallback(void* payload) final;
 
+	typedef uint32_t ip_t;
+	typedef unsigned short int port_t;
+
 	const static int MAX_PORT_NUM = 65536;
-	std::unordered_set<uint32_t> ip_set[MAX_PORT_NUM];
-	bool is_addr_any[MAX_PORT_NUM];
+
 	struct proc_entry {
 		std::unordered_set<int> fd_set;
-		std::unordered_map<int, std::pair<uint32_t, unsigned short int>> fd_info;
-		std::unordered_map<int, std::pair<struct sockaddr, socklen_t>> fd_info_raw;
+		std::unordered_map<int, std::pair<struct sockaddr, socklen_t>> fd_info;
 
 		struct blocked_accept {
 			UUID syscallUUID;
@@ -54,7 +55,12 @@ private:
 		std::queue<blocked_accept> accept_queue;
 		std::queue<blocked_connect> connect_queue;
 	};
+	
+	std::unordered_set<ip_t> ip_set[MAX_PORT_NUM];
+	bool is_addr_any[MAX_PORT_NUM];
 	std::unordered_map<int, struct proc_entry> proc_table;
+
+	std::pair<ip_t, port_t> addr_ip_port(const struct sockaddr addr);
 
 public:
 	TCPAssignment(Host* host);

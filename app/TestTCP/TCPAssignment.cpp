@@ -125,34 +125,32 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, 
 	int fd)
 {
-	auto it0 = proc_table.find(pid);
-	if (it0 == proc_table.end())
+	auto pe_it = proc_table.find(pid);
+	if (pe_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	auto &pe = it0->second;
+	auto &pe = pe_it->second;
 	auto &fd_set = pe.fd_set;
 	auto &fd_info = pe.fd_info;
-	auto &fd_info_raw = pe.fd_info_raw;
 
-	auto it1 = fd_set.find(fd);
-	if(it1 == fd_set.end())
+	auto fd_it = fd_set.find(fd);
+	if(fd_it == fd_set.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	fd_set.erase(it1);
+	fd_set.erase(fd_it);
 
-	auto it2 = fd_info.find(fd);
-	if(it2 != fd_info.end())
+	auto addr_it = fd_info.find(fd);
+	if(addr_it != fd_info.end())
 	{
-		uint32_t ip;
-		unsigned short int port;
+		ip_t ip;
+		port_t port;
+		std::tie(ip, port) = addr_ip_port(addr_it->second.first);
 
-		std::tie(ip, port) = it2->second;
-		fd_info.erase(it2);
-		fd_info_raw.erase(fd);
+		fd_info.erase(addr_it);
 
 		if(ip == INADDR_ANY)
 			is_addr_any[port] = false;
@@ -167,28 +165,25 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, 
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	auto it0 = proc_table.find(pid);
-	if (it0 == proc_table.end())
+	auto pe_it = proc_table.find(pid);
+	if (pe_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	auto &pe = it0->second;
+	auto &pe = pe_it->second;
 	auto &fd_set = pe.fd_set;
 	auto &fd_info = pe.fd_info;
-	auto &fd_info_raw = pe.fd_info_raw;
 
-	if(fd_set.find(sockfd) == fd_set.end() || fd_info_raw.find(sockfd) != fd_info_raw.end())
+	if(fd_set.find(sockfd) == fd_set.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-	uint32_t ip;
-	unsigned short int port;
-
-	ip = ((struct sockaddr_in *)addr)->sin_addr.s_addr;
-	port = ((struct sockaddr_in *)addr)->sin_port;
+	ip_t ip;
+	port_t port;
+	std::tie(ip, port) = addr_ip_port(*addr);
 
 	if(ip == INADDR_ANY)
 	{
@@ -206,32 +201,31 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 		return;
 	}
 
-	fd_info[sockfd] = { ip, port };
-	fd_info_raw[sockfd] = { *addr, addrlen };
+	fd_info[sockfd] = { *addr, addrlen };
 	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, 
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto it0 = proc_table.find(pid);
-	if (it0 == proc_table.end())
+	auto pe_it = proc_table.find(pid);
+	if (pe_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	auto &pe = it0->second;
-	auto &fd_info_raw = pe.fd_info_raw;
+	auto &pe = pe_it->second;
+	auto &fd_info = pe.fd_info;
 
-	auto it = fd_info_raw.find(sockfd);
-	if(it == fd_info_raw.end())
+	auto addr_it = fd_info.find(sockfd);
+	if(addr_it == fd_info.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-	*addr = it->second.first;
-	*addrlen = it->second.second;
+	*addr = addr_it->second.first;
+	*addrlen = addr_it->second.second;
 
 	this->returnSystemCall(syscallUUID, 0);
 }
@@ -259,5 +253,12 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 {
 	
 }
+
+
+std::pair<TCPAssignment::ip_t, TCPAssignment::port_t> TCPAssignment::addr_ip_port(const struct sockaddr addr)
+{
+	return { ((struct sockaddr_in *)(&addr))->sin_addr.s_addr, ((struct sockaddr_in *)(&addr))->sin_port };
+}
+
 
 }
