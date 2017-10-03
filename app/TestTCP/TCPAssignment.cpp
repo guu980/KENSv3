@@ -29,6 +29,7 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 		NetworkLog(host->getNetworkSystem()),
 		TimerModule(host->getSystem())
 {
+	/* Perhaps we can believe STL? */
 	proc_table.clear();
 	for(int i = 0; i<MAX_PORT_NUM; i++)
 		ip_set[i].clear();
@@ -99,7 +100,18 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 {
-
+	if(fromModule.compare("IPv4") == 0)
+	{
+		/* Packet arrived from IPv4 Module!
+		 * (1) Read from packet local and remote addresses.
+		 * (2) Forward the packet to corresponding TCPSocket.
+		 * (3) Handle the packet according to the state of the socket.
+		 */
+	}
+	else
+	{
+		assert(0);
+	}
 }
 
 void TCPAssignment::timerCallback(void* payload)
@@ -111,6 +123,12 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 		int domain, int protocol)
 {
 	//assert(domain == AF_INET && protocol == IPPROTO_TCP);
+	if (protocol != IPPROTO_TCP)
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
 	int fd = this->createFileDescriptor(pid);
 
 	if(fd != -1 && protocol == IPPROTO_TCP)
@@ -137,12 +155,13 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
+	auto &sock = sock_it->second;
 
-	if (sock_it->second.state != ST_READY)
+	if (sock.state != ST_READY)
 	{
 		in_addr_t ip;
 		in_port_t port;
-		std::tie(ip, port) = addr_ip_port(&sock_it->second.local_addr);
+		std::tie(ip, port) = addr_ip_port(&sock.local_addr);
 
 		ip_set[port].erase(ip);
 	}
@@ -208,9 +227,10 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
+	auto &sock = sock_it->second;
 
-	*addr = *((struct sockaddr *)&sock_it->second.local_addr);
-	*addrlen = (socklen_t)sizeof(sock_it->second.local_addr);
+	*addr = *((struct sockaddr *)&sock.local_addr);
+	*addrlen = (socklen_t)sizeof(sock.local_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
@@ -229,7 +249,24 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	
+	auto pcb_it = proc_table.find(pid);
+	if (pcb_it == proc_table.end())
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &fd_info = pcb_it->second.fd_info;
+
+	auto sock_it = fd_info.find(sockfd);
+	if(sock_it == fd_info.end() || sock_it->second.state != ST_ESTAB)
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
+	*addr = *((struct sockaddr *)&sock_it->second.remote_addr);
+	*addrlen = (socklen_t)sizeof(sock_it->second.remote_addr);
+	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
@@ -242,6 +279,8 @@ TCPAssignment::TCPSocket::TCPSocket(int domain)
 {
 	this->domain = domain;
 	this->state = ST_READY;
+	memset(&this->local_addr, 0, sizeof(this->local_addr));
+	memset(&this->remote_addr, 0, sizeof(this->local_addr));
 }
 TCPAssignment::TCPSocket::~TCPSocket()
 {
@@ -263,7 +302,7 @@ void TCPAssignment::TCPSocket::setRemoteAddr(in_addr_t addr, in_port_t port)
 TCPAssignment::PCBEntry::PCBEntry()
 {
 	fd_info.clear();
-	// Do something more...
+	blocked = false;
 }
 TCPAssignment::PCBEntry::~PCBEntry()
 {

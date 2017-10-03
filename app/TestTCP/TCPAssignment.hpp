@@ -21,6 +21,7 @@
 
 #include <unordered_set>
 #include <unordered_map>
+#include <queue>
 
 namespace E
 {
@@ -60,6 +61,10 @@ private:
 		struct sockaddr_in local_addr;
 		struct sockaddr_in remote_addr;
 
+		std::queue<Packet *> listen_queue;
+		std::queue<std::pair<struct sockaddr_in, struct sockaddr_in>> accept_queue;
+		int backlog;	/* Associated to LISTEN_QUEUE. */
+
 		TCPSocket(int domain);
 		~TCPSocket();
 		void setLocalAddr(in_addr_t addr, in_port_t port);
@@ -71,7 +76,8 @@ private:
 	public:
 		std::unordered_map<int, TCPSocket> fd_info;
 
-		// More things to do...
+		bool blocked;
+		enum SystemCall syscall;
 		union blocked_syscall {
 			struct blocked_accept {
 				UUID syscallUUID;
