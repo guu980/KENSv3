@@ -21,7 +21,6 @@
 
 #include <unordered_set>
 #include <unordered_map>
-#include <queue>
 
 namespace E
 {
@@ -35,49 +34,71 @@ private:
 
 	const static int MAX_PORT_NUM = 65536;
 
-	enum tcp_state {
-		ST_INACTIVE, 	/* Only for server. Before LISTEN. */
-
-		ST_LISTEN,		/* Connect ready. */
+	enum TCPState
+	{
+		ST_READY, 		/* Socket is ready. */
+		ST_BOUND,		/* Socket is bound. */
+		ST_LISTEN,		/* Connect ready. Only for server. */
 		ST_SYN_SENT,	/* 3-way handshake, client. */
 		ST_SYN_RCVD,	/* 3-way handshake, server. */
 		ST_ESTAB,		/* Connection established. */
 
-		ST_FIN_WAIT_1,	/* 4-way handshake, client. */
+		ST_FIN_WAIT_1,	/* 4-way handshake, active close. */
 		ST_FIN_WAIT_2,
-		ST_TIMED_WAIT,
-		ST_CLOSE_WAIT,	/* 4-way handshake, server. */
+		ST_TIME_WAIT,
+		ST_CLOSE_WAIT,	/* 4-way handshake, passive close. */
 		ST_LAST_ACK,
-		ST_CLOSED		/* Finally closed. */
+
+		ST_CLOSING		/* Recieved FIN after sending FIN. */
 	};
 
-	struct proc_entry {
-		std::unordered_set<int> fd_set;
-		std::unordered_map<int, std::pair<sockaddr, socklen_t>> fd_info;
+	class TCPSocket
+	{
+	public:
+		int domain;		/* This is always AF_INET in KENSv3. */
+		enum TCPState state;
+		struct sockaddr_in local_addr;
+		struct sockaddr_in remote_addr;
 
-		struct blocked_accept {
-			UUID syscallUUID;
-			int sockfd;
-			struct sockaddr *addr;
-			socklen_t *addrlen;
+		TCPSocket(int domain);
+		~TCPSocket();
+		void setLocalAddr(in_addr_t addr, in_port_t port);
+		void setRemoteAddr(in_addr_t addr, in_port_t port);
+	};
+
+	class PCBEntry
+	{
+	public:
+		std::unordered_map<int, TCPSocket> fd_info;
+
+		// More things to do...
+		union blocked_syscall {
+			struct blocked_accept {
+				UUID syscallUUID;
+				int sockfd;
+				struct sockaddr *addr;
+				socklen_t *addrlen;
+			};
+
+			struct blocked_connect {
+				UUID syscallUUID;
+				int sockfd;
+				const struct sockaddr *addr;
+				socklen_t addrlen;
+			};
 		};
 
-		struct blocked_connect {
-			UUID syscallUUID;
-			int sockfd;
-			const struct sockaddr *addr;
-			socklen_t addrlen;
-		};
-
-		std::queue<blocked_accept> accept_queue;
-		std::queue<blocked_connect> connect_queue;
+		PCBEntry();
+		~PCBEntry();
 	};
 	
-	std::unordered_set<in_addr_t> ip_set[MAX_PORT_NUM];
-	bool is_addr_any[MAX_PORT_NUM];
-	std::unordered_map<int, proc_entry> proc_table;
+	std::unordered_map<in_addr_t, std::pair<int, int>> ip_set[MAX_PORT_NUM];
+	std::unordered_map<int, PCBEntry> proc_table;
 
-	std::pair<in_addr_t, in_port_t> addr_ip_port(const sockaddr addr);
+	static inline std::pair<in_addr_t, in_port_t> addr_ip_port(struct sockaddr_in *addr)
+	{
+		return { ntohl(addr->sin_addr.s_addr), ntohs(addr->sin_port) };
+	}
 
 public:
 	TCPAssignment(Host* host);

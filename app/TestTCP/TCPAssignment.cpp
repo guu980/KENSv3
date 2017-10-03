@@ -31,10 +31,7 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 {
 	proc_table.clear();
 	for(int i = 0; i<MAX_PORT_NUM; i++)
-	{
 		ip_set[i].clear();
-		is_addr_any[i] = false;
-	}
 }
 
 TCPAssignment::~TCPAssignment()
@@ -116,8 +113,8 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 	//assert(domain == AF_INET && protocol == IPPROTO_TCP);
 	int fd = this->createFileDescriptor(pid);
 
-	if(fd != -1)
-		proc_table[pid].fd_set.insert(fd);
+	if(fd != -1 && protocol == IPPROTO_TCP)
+		proc_table[pid].fd_info.insert({ fd, TCPSocket(domain) });
 
 	this->returnSystemCall(syscallUUID, fd);
 }
@@ -126,38 +123,31 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, 
 	int fd)
 {
-	auto pe_it = proc_table.find(pid);
-	if (pe_it == proc_table.end())
+	auto pcb_it = proc_table.find(pid);
+	if (pcb_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	auto &pe = pe_it->second;
-	auto &fd_set = pe.fd_set;
-	auto &fd_info = pe.fd_info;
+	auto &fd_info = pcb_it->second.fd_info;
 
-	auto fd_it = fd_set.find(fd);
-	if(fd_it == fd_set.end())
+	auto sock_it = fd_info.find(fd);
+	if(sock_it == fd_info.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	fd_set.erase(fd_it);
 
-	auto addr_it = fd_info.find(fd);
-	if(addr_it != fd_info.end())
+	if (sock_it->second.state != ST_READY)
 	{
 		in_addr_t ip;
 		in_port_t port;
-		std::tie(ip, port) = addr_ip_port(addr_it->second.first);
+		std::tie(ip, port) = addr_ip_port(&sock_it->second.local_addr);
 
-		fd_info.erase(addr_it);
-
-		if(ip == INADDR_ANY)
-			is_addr_any[port] = false;
-		else
-			ip_set[port].erase(ip);
+		ip_set[port].erase(ip);
 	}
+
+	fd_info.erase(sock_it);
 
 	this->removeFileDescriptor(pid, fd);
 	this->returnSystemCall(syscallUUID, 0);
@@ -166,82 +156,67 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, 
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	auto pe_it = proc_table.find(pid);
-	if (pe_it == proc_table.end())
+	auto pcb_it = proc_table.find(pid);
+	if (pcb_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	auto &pe = pe_it->second;
-	auto &fd_set = pe.fd_set;
-	auto &fd_info = pe.fd_info;
+	auto &fd_info = pcb_it->second.fd_info;
 
-	if(fd_set.find(sockfd) == fd_set.end() || fd_info.find(sockfd) != fd_info.end())
+	auto sock_it = fd_info.find(sockfd);
+	if (sock_it == fd_info.end() || sock_it->second.state != ST_READY)
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
+	auto &sock = sock_it->second;
 
 	in_addr_t ip;
 	in_port_t port;
-	std::tie(ip, port) = addr_ip_port(*addr);
-	
-	if(ip == INADDR_ANY)
-	{
-		if(is_addr_any[port] || !ip_set[port].empty())
-		{
-			this->returnSystemCall(syscallUUID, -1);
-			return;
-		}
-
-		is_addr_any[port] = true;
-	}
-	else if(is_addr_any[port] || !ip_set[port].insert(ip).second)
+	std::tie(ip, port) = addr_ip_port((struct sockaddr_in *)addr);
+	if(!ip_set[port].empty()
+		&& (ip == INADDR_ANY
+			|| ip_set[port].begin()->first == INADDR_ANY
+			|| ip_set[port].find(ip) != ip_set[port].end()))
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-	fd_info[sockfd] = { *addr, addrlen };
+	sock.setLocalAddr(ip, port);
+	sock.state = ST_BOUND;
+	ip_set[port][ip] = { pid, sockfd };
+
 	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, 
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto pe_it = proc_table.find(pid);
-	if (pe_it == proc_table.end())
+	auto pcb_it = proc_table.find(pid);
+	if (pcb_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
-	auto &pe = pe_it->second;
-	auto &fd_info = pe.fd_info;
+	auto &fd_info = pcb_it->second.fd_info;
 
-	auto addr_it = fd_info.find(sockfd);
-	if(addr_it == fd_info.end())
+	auto sock_it = fd_info.find(sockfd);
+	if(sock_it == fd_info.end() || sock_it->second.state == ST_READY)
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 
-	*addr = addr_it->second.first;
-	*addrlen = addr_it->second.second;
-
+	*addr = *((struct sockaddr *)&sock_it->second.local_addr);
+	*addrlen = (socklen_t)sizeof(sock_it->second.local_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto pe_it = proc_table.find(pid);
-	if (pe_it == proc_table.end())
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-	auto &pe = pe_it->second;
-
 	// Do something...
 }
 
@@ -263,11 +238,36 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	
 }
 
-
-std::pair<in_addr_t, in_port_t> TCPAssignment::addr_ip_port(const sockaddr addr)
+TCPAssignment::TCPSocket::TCPSocket(int domain)
 {
-	return { ((sockaddr_in *)(&addr))->sin_addr.s_addr, ((sockaddr_in *)(&addr))->sin_port };
+	this->domain = domain;
+	this->state = ST_READY;
+}
+TCPAssignment::TCPSocket::~TCPSocket()
+{
+
+}
+void TCPAssignment::TCPSocket::setLocalAddr(in_addr_t addr, in_port_t port)
+{
+	local_addr.sin_family = AF_INET;
+	local_addr.sin_addr.s_addr = htonl(addr);
+	local_addr.sin_port = htons(port);
+}
+void TCPAssignment::TCPSocket::setRemoteAddr(in_addr_t addr, in_port_t port)
+{
+	remote_addr.sin_family = AF_INET;
+	remote_addr.sin_addr.s_addr = htonl(addr);
+	remote_addr.sin_port = htons(port);
 }
 
+TCPAssignment::PCBEntry::PCBEntry()
+{
+	fd_info.clear();
+	// Do something more...
+}
+TCPAssignment::PCBEntry::~PCBEntry()
+{
+
+}
 
 }
