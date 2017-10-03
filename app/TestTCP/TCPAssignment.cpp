@@ -16,6 +16,7 @@
 
 #include <tuple>
 #include <cstdio>
+#include <iostream>
 
 #define VOID_RETURN 0
 
@@ -175,7 +176,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	auto &fd_set = pe.fd_set;
 	auto &fd_info = pe.fd_info;
 
-	if(fd_set.find(sockfd) == fd_set.end())
+	if(fd_set.find(sockfd) == fd_set.end() || fd_info.find(sockfd) != fd_info.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -184,7 +185,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	in_addr_t ip;
 	in_port_t port;
 	std::tie(ip, port) = addr_ip_port(*addr);
-
+	
 	if(ip == INADDR_ANY)
 	{
 		if(is_addr_any[port] || !ip_set[port].empty())
