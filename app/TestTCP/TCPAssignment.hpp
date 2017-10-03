@@ -33,10 +33,23 @@ private:
 private:
 	virtual void timerCallback(void* payload) final;
 
-	typedef uint32_t ip_t;
-	typedef unsigned short int port_t;
-
 	const static int MAX_PORT_NUM = 65536;
+
+	enum tcp_state {
+		ST_INACTIVE, 	/* Only for server. Before LISTEN. */
+
+		ST_LISTEN,		/* Connect ready. */
+		ST_SYN_SENT,	/* 3-way handshake, client. */
+		ST_SYN_RCVD,	/* 3-way handshake, server. */
+		ST_ESTAB,		/* Connection established. */
+
+		ST_FIN_WAIT_1,	/* 4-way handshake, client. */
+		ST_FIN_WAIT_2,
+		ST_TIMED_WAIT,
+		ST_CLOSE_WAIT,	/* 4-way handshake, server. */
+		ST_LAST_ACK,
+		ST_CLOSED		/* Finally closed. */
+	};
 
 	struct proc_entry {
 		std::unordered_set<int> fd_set;
@@ -44,23 +57,27 @@ private:
 
 		struct blocked_accept {
 			UUID syscallUUID;
-			// Wait...
+			int sockfd;
+			struct sockaddr *addr;
+			socklen_t *addrlen;
 		};
 
 		struct blocked_connect {
 			UUID syscallUUID;
-			// Wait...
+			int sockfd;
+			const struct sockaddr *addr;
+			socklen_t addrlen;
 		};
 
 		std::queue<blocked_accept> accept_queue;
 		std::queue<blocked_connect> connect_queue;
 	};
 	
-	std::unordered_set<ip_t> ip_set[MAX_PORT_NUM];
+	std::unordered_set<in_addr_t> ip_set[MAX_PORT_NUM];
 	bool is_addr_any[MAX_PORT_NUM];
 	std::unordered_map<int, proc_entry> proc_table;
 
-	std::pair<ip_t, port_t> addr_ip_port(const sockaddr addr);
+	std::pair<in_addr_t, in_port_t> addr_ip_port(const sockaddr addr);
 
 public:
 	TCPAssignment(Host* host);
