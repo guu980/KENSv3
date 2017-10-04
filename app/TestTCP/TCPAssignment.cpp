@@ -118,7 +118,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		in_port_t port;
 
 		packet->readData(ip_start, &ihl_buffer, 1);
-		ihl = ntohl(ihl_buffer & 0x0f) << 2;
+		ihl = (ihl_buffer & 0x0f) << 2;
 		tcp_start = ip_start + ihl;
 
 		packet->readData(ip_start + 16, &ip_buffer, 4);
