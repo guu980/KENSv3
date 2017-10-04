@@ -132,12 +132,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			if (ip_set[port].begin()->first == INADDR_ANY)
 			{
 				std::tie(pid, fd) = ip_set[port].begin()->second;
-				proc_table[pid].fd_info.find(fd)->second.handlePacket(packet);
+				getPCBEntry(pid).fd_info.find(fd)->second.handlePacket(packet);
 			}
 			else if (ip_set[port].find(ip) != ip_set[port].end())
 			{
 				std::tie(pid, fd) = ip_set[port].find(ip)->second;
-				proc_table[pid].fd_info.find(fd)->second.handlePacket(packet);
+				getPCBEntry(pid).fd_info.find(fd)->second.handlePacket(packet);
 			}
 		}
 		/* Otherwise, ignore the packet. */
@@ -165,8 +165,10 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 
 	int fd = this->createFileDescriptor(pid);
 
-	if(fd != -1 && protocol == IPPROTO_TCP)
-		proc_table[pid].fd_info.insert({ fd, TCPSocket(domain) });
+	if(fd != -1)
+	{
+		getPCBEntry(pid).fd_info.insert({ fd, TCPSocket(domain) });
+	}
 
 	this->returnSystemCall(syscallUUID, fd);
 }
@@ -175,13 +177,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, 
 	int fd)
 {
-	auto pcb_it = proc_table.find(pid);
-	if(pcb_it == proc_table.end())
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-	auto &fd_info = pcb_it->second.fd_info;
+	auto &fd_info = getPCBEntry(pid).fd_info;
 
 	auto sock_it = fd_info.find(fd);
 	if(sock_it == fd_info.end())
@@ -195,7 +191,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	{
 		in_addr_t ip;
 		in_port_t port;
-		std::tie(ip, port) = addr_ip_port(&sock.local_addr);
+		std::tie(ip, port) = addr_ip_port(sock.getLocalAddr());
 
 		ip_set[port].erase(ip);
 	}
@@ -209,13 +205,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, 
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	auto pcb_it = proc_table.find(pid);
-	if(pcb_it == proc_table.end())
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-	auto &fd_info = pcb_it->second.fd_info;
+	auto &fd_info = getPCBEntry(pid).fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state != ST_READY)
@@ -247,13 +237,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, 
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto pcb_it = proc_table.find(pid);
-	if(pcb_it == proc_table.end())
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-	auto &fd_info = pcb_it->second.fd_info;
+	auto &fd_info = getPCBEntry(pid).fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state == ST_READY)
@@ -263,15 +247,42 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	}
 	auto &sock = sock_it->second;
 
-	*addr = *((struct sockaddr *)&sock.local_addr);
-	*addrlen = (socklen_t)sizeof(sock.local_addr);
+	*addr = *((struct sockaddr *)sock.getLocalAddr());
+	*addrlen = (socklen_t)sizeof(*sock.getLocalAddr());
 	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	// Do something...
+	PCBEntry &pcb = getPCBEntry(pid);
+	auto &fd_info = pcb.fd_info;
+
+	auto sock_it = fd_info.find(sockfd);
+	if(sock_it == fd_info.end() || sock_it->second.state != ST_LISTEN)
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &sock = sock_it->second;
+
+	auto &accept_queue = sock.queues->accept_queue;
+	if(accept_queue.empty())
+	{
+		pcb.blockSystemCall(ACCEPT, syscallUUID, sockfd);
+		return;
+	}
+
+	int connfd = this->createFileDescriptor(pid);
+	if (connfd != -1)
+	{
+		fd_info.insert({ connfd, TCPSocket(sock.domain) });
+		auto &sock_accept = fd_info.find(connfd)->second;
+		sock_accept.state = ST_ESTAB;
+		sock_accept.context = accept_queue.front(); accept_queue.pop();
+	}
+
+	this->returnSystemCall(syscallUUID, connfd);
 }
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
@@ -283,13 +294,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto pcb_it = proc_table.find(pid);
-	if(pcb_it == proc_table.end())
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-	auto &fd_info = pcb_it->second.fd_info;
+	auto &fd_info = getPCBEntry(pid).fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state != ST_ESTAB)
@@ -298,21 +303,15 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 		return;
 	}
 
-	*addr = *((struct sockaddr *)&sock_it->second.remote_addr);
-	*addrlen = (socklen_t)sizeof(sock_it->second.remote_addr);
+	*addr = *((struct sockaddr *)sock_it->second.getRemoteAddr());
+	*addrlen = (socklen_t)sizeof(*sock_it->second.getRemoteAddr());
 	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
-	auto pcb_it = proc_table.find(pid);
-	if(pcb_it == proc_table.end())
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-	auto &fd_info = pcb_it->second.fd_info;
+	auto &fd_info = getPCBEntry(pid).fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state != ST_BOUND)
@@ -327,22 +326,38 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	this->returnSystemCall(syscallUUID, 0);
 }
 
+TCPAssignment::PCBEntry &TCPAssignment::getPCBEntry(int pid)
+{
+	auto pcb_it = proc_table.find(pid);
+	if (pcb_it == proc_table.end())
+		pcb_it = proc_table.emplace(pid, this).first;
+	return pcb_it->second;
+}
+
+TCPAssignment::TCPContext::TCPContext()
+{
+	memset(&this->local_addr, 0, sizeof(this->local_addr));
+	memset(&this->remote_addr, 0, sizeof(this->local_addr));
+}
+TCPAssignment::TCPContext::~TCPContext()
+{
+
+}
+
 TCPAssignment::PassiveQueue::PassiveQueue(int backlog) : listen_queue(), accept_queue()
 {
 	this->backlog = backlog;
+	this->temp_buffer.clear();
 }
 TCPAssignment::PassiveQueue::~PassiveQueue()
 {
 
 }
 
-TCPAssignment::TCPSocket::TCPSocket(int domain)
+TCPAssignment::TCPSocket::TCPSocket(int domain) : context()
 {
 	this->domain = domain;
 	this->state = ST_READY;
-	memset(&this->local_addr, 0, sizeof(this->local_addr));
-	memset(&this->remote_addr, 0, sizeof(this->local_addr));
-
 	this->queues = nullptr;
 }
 TCPAssignment::TCPSocket::~TCPSocket()
@@ -351,24 +366,28 @@ TCPAssignment::TCPSocket::~TCPSocket()
 }
 void TCPAssignment::TCPSocket::setLocalAddr(in_addr_t addr, in_port_t port)
 {
-	local_addr.sin_family = AF_INET;
-	local_addr.sin_addr.s_addr = htonl(addr);
-	local_addr.sin_port = htons(port);
+	context.local_addr.sin_family = AF_INET;
+	context.local_addr.sin_addr.s_addr = htonl(addr);
+	context.local_addr.sin_port = htons(port);
 }
 void TCPAssignment::TCPSocket::setRemoteAddr(in_addr_t addr, in_port_t port)
 {
-	remote_addr.sin_family = AF_INET;
-	remote_addr.sin_addr.s_addr = htonl(addr);
-	remote_addr.sin_port = htons(port);
+	context.remote_addr.sin_family = AF_INET;
+	context.remote_addr.sin_addr.s_addr = htonl(addr);
+	context.remote_addr.sin_port = htons(port);
+}
+struct sockaddr_in *TCPAssignment::TCPSocket::getLocalAddr()
+{
+	return &this->context.local_addr;
+}
+struct sockaddr_in *TCPAssignment::TCPSocket::getRemoteAddr()
+{
+	return &this->context.remote_addr;
 }
 void TCPAssignment::TCPSocket::handlePacket(Packet *packet)
 {
 	switch(this->state)
 	{
-	case ST_READY:
-	case ST_BOUND:
-		/* Cannot handle any packet. Just break. */
-		break;
 	case ST_LISTEN:
 
 		break;
@@ -402,18 +421,32 @@ void TCPAssignment::TCPSocket::handlePacket(Packet *packet)
 
 		break;
 	default:
-		assert(0);
+		;
+		/* Do nothing. */
 	}
 }
 
-TCPAssignment::PCBEntry::PCBEntry()
+TCPAssignment::PCBEntry::PCBEntry(TCPAssignment *host)
 {
-	fd_info.clear();
-	blocked = false;
+	this->host = host;
+	this->fd_info.clear();
+	this->blocked = false;
 }
 TCPAssignment::PCBEntry::~PCBEntry()
 {
 
+}
+void TCPAssignment::PCBEntry::blockSystemCall(enum SystemCall blockedNum, UUID blockedUUID, int blockfd)
+{
+	this->blocked = true;
+	this->blockedNum = blockedNum;
+	this->blockedUUID = blockedUUID;
+	this->blockfd = blockfd;
+}
+void TCPAssignment::PCBEntry::unblockSystemCall(int ret)
+{
+	this->blocked = false;
+	this->host->returnSystemCall(this->blockedUUID, ret);
 }
 
 }

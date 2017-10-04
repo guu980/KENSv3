@@ -53,12 +53,34 @@ private:
 		ST_CLOSING		/* Recieved FIN after sending FIN. */
 	};
 
+	class TCPContext
+	{
+	public:
+		struct sockaddr_in local_addr;
+		struct sockaddr_in remote_addr;
+
+		TCPContext();
+		~TCPContext();
+	};
+
 	class PassiveQueue
 	{
 	public:
 		std::queue<Packet *> listen_queue;
-		std::queue<std::pair<struct sockaddr_in, struct sockaddr_in>> accept_queue;
+		std::queue<TCPContext> accept_queue;
 		int backlog;
+
+		struct AddrHash
+		{
+			std::size_t operator()(const TCPContext &context) const
+			{
+				/* Most time, the local address will be the same. */
+				std::size_t h1 = std::hash<in_addr_t>{}(context.remote_addr.sin_addr.s_addr);
+				std::size_t h2 = std::hash<in_port_t>{}(context.remote_addr.sin_port);
+				return h1 ^ (h2 << 1);
+			}
+		};
+		std::unordered_map<TCPContext, std::queue<Packet *>, AddrHash> temp_buffer;
 
 		PassiveQueue(int backlog);
 		~PassiveQueue();
@@ -69,8 +91,7 @@ private:
 	public:
 		int domain;		/* This is always AF_INET in KENSv3. */
 		enum TCPState state;
-		struct sockaddr_in local_addr;
-		struct sockaddr_in remote_addr;
+		TCPContext context;
 
 		PassiveQueue *queues;	/* Only used for LISTENing. */
 
@@ -78,34 +99,27 @@ private:
 		~TCPSocket();
 		void setLocalAddr(in_addr_t addr, in_port_t port);
 		void setRemoteAddr(in_addr_t addr, in_port_t port);
+		struct sockaddr_in *getLocalAddr();
+		struct sockaddr_in *getRemoteAddr();
 		void handlePacket(Packet *packet);
 	};
 
 	class PCBEntry
 	{
+	private:
+		TCPAssignment *host;
 	public:
 		std::unordered_map<int, TCPSocket> fd_info;
 
 		bool blocked;
-		enum SystemCall syscall;
-		union blocked_syscall {
-			struct blocked_accept {
-				UUID syscallUUID;
-				int sockfd;
-				struct sockaddr *addr;
-				socklen_t *addrlen;
-			};
+		enum SystemCall blockedNum;
+		UUID blockedUUID;
+		int blockfd;		/* Which socket blocked the system call? */
 
-			struct blocked_connect {
-				UUID syscallUUID;
-				int sockfd;
-				const struct sockaddr *addr;
-				socklen_t addrlen;
-			};
-		};
-
-		PCBEntry();
+		PCBEntry(TCPAssignment *host);
 		~PCBEntry();
+		void blockSystemCall(enum SystemCall blockedNum, UUID blockedUUID, int blockfd);
+		void unblockSystemCall(int ret);
 	};
 	
 	std::unordered_map<in_addr_t, std::pair<int, int>> ip_set[MAX_PORT_NUM];
@@ -115,6 +129,8 @@ private:
 	{
 		return { ntohl(addr->sin_addr.s_addr), ntohs(addr->sin_port) };
 	}
+
+	PCBEntry &getPCBEntry(int pid);
 
 public:
 	TCPAssignment(Host* host);
@@ -140,7 +156,6 @@ public:
 		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 	void syscall_listen(UUID syscallUUID, int pid,
 		int sockfd, int backlog);
-
 
 protected:
 	virtual void systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param) final;
