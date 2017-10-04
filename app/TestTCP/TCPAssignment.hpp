@@ -53,6 +53,17 @@ private:
 		ST_CLOSING		/* Recieved FIN after sending FIN. */
 	};
 
+	class PassiveQueue
+	{
+	public:
+		std::queue<Packet *> listen_queue;
+		std::queue<std::pair<struct sockaddr_in, struct sockaddr_in>> accept_queue;
+		int backlog;
+
+		PassiveQueue(int backlog);
+		~PassiveQueue();
+	};
+
 	class TCPSocket
 	{
 	public:
@@ -61,14 +72,13 @@ private:
 		struct sockaddr_in local_addr;
 		struct sockaddr_in remote_addr;
 
-		std::queue<Packet *> listen_queue;
-		std::queue<std::pair<struct sockaddr_in, struct sockaddr_in>> accept_queue;
-		int backlog;	/* Associated to LISTEN_QUEUE. */
+		PassiveQueue *queues;	/* Only used for LISTENing. */
 
 		TCPSocket(int domain);
 		~TCPSocket();
 		void setLocalAddr(in_addr_t addr, in_port_t port);
 		void setRemoteAddr(in_addr_t addr, in_port_t port);
+		void handlePacket(Packet *packet);
 	};
 
 	class PCBEntry

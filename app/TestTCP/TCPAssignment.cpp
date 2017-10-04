@@ -107,6 +107,40 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		 * (2) Forward the packet to corresponding TCPSocket.
 		 * (3) Handle the packet according to the state of the socket.
 		 */
+		size_t ip_start = 14;
+		size_t ihl;
+		uint8_t ihl_buffer;
+		uint32_t ip_buffer;
+		in_addr_t ip;
+
+		size_t tcp_start;
+		uint16_t port_buffer;
+		in_port_t port;
+
+		packet->readData(ip_start, &ihl_buffer, 1);
+		ihl = ntohl(ihl_buffer & 0x0f) << 2;
+		tcp_start = ip_start + ihl;
+
+		packet->readData(ip_start + 16, &ip_buffer, 4);
+		packet->readData(tcp_start + 2, &port_buffer, 2);
+		ip = (in_addr_t)ntohl(ip_buffer);
+		port = (in_port_t)ntohs(port_buffer);
+
+		int pid, fd;
+		if (!ip_set[port].empty())
+		{
+			if (ip_set[port].begin()->first == INADDR_ANY)
+			{
+				std::tie(pid, fd) = ip_set[port].begin()->second;
+				proc_table[pid].fd_info.find(fd)->second.handlePacket(packet);
+			}
+			else if (ip_set[port].find(ip) != ip_set[port].end())
+			{
+				std::tie(pid, fd) = ip_set[port].find(ip)->second;
+				proc_table[pid].fd_info.find(fd)->second.handlePacket(packet);
+			}
+		}
+		/* Otherwise, ignore the packet. */
 	}
 	else
 	{
@@ -123,7 +157,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 		int domain, int protocol)
 {
 	//assert(domain == AF_INET && protocol == IPPROTO_TCP);
-	if (protocol != IPPROTO_TCP)
+	if(protocol != IPPROTO_TCP)
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -142,7 +176,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	int fd)
 {
 	auto pcb_it = proc_table.find(pid);
-	if (pcb_it == proc_table.end())
+	if(pcb_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -157,7 +191,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	}
 	auto &sock = sock_it->second;
 
-	if (sock.state != ST_READY)
+	if(sock.state != ST_READY)
 	{
 		in_addr_t ip;
 		in_port_t port;
@@ -176,7 +210,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
 	auto pcb_it = proc_table.find(pid);
-	if (pcb_it == proc_table.end())
+	if(pcb_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -184,7 +218,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	auto &fd_info = pcb_it->second.fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if (sock_it == fd_info.end() || sock_it->second.state != ST_READY)
+	if(sock_it == fd_info.end() || sock_it->second.state != ST_READY)
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -214,7 +248,7 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
 	auto pcb_it = proc_table.find(pid);
-	if (pcb_it == proc_table.end())
+	if(pcb_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -250,7 +284,7 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
 	auto pcb_it = proc_table.find(pid);
-	if (pcb_it == proc_table.end())
+	if(pcb_it == proc_table.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -272,7 +306,34 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
-	
+	auto pcb_it = proc_table.find(pid);
+	if(pcb_it == proc_table.end())
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &fd_info = pcb_it->second.fd_info;
+
+	auto sock_it = fd_info.find(sockfd);
+	if(sock_it == fd_info.end() || sock_it->second.state != ST_BOUND)
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &sock = sock_it->second;
+
+	sock.state = ST_LISTEN;
+	sock.queues = new PassiveQueue(backlog);
+	this->returnSystemCall(syscallUUID, 0);
+}
+
+TCPAssignment::PassiveQueue::PassiveQueue(int backlog) : listen_queue(), accept_queue()
+{
+	this->backlog = backlog;
+}
+TCPAssignment::PassiveQueue::~PassiveQueue()
+{
+
 }
 
 TCPAssignment::TCPSocket::TCPSocket(int domain)
@@ -281,10 +342,12 @@ TCPAssignment::TCPSocket::TCPSocket(int domain)
 	this->state = ST_READY;
 	memset(&this->local_addr, 0, sizeof(this->local_addr));
 	memset(&this->remote_addr, 0, sizeof(this->local_addr));
+
+	this->queues = nullptr;
 }
 TCPAssignment::TCPSocket::~TCPSocket()
 {
-
+	delete queues;
 }
 void TCPAssignment::TCPSocket::setLocalAddr(in_addr_t addr, in_port_t port)
 {
@@ -297,6 +360,50 @@ void TCPAssignment::TCPSocket::setRemoteAddr(in_addr_t addr, in_port_t port)
 	remote_addr.sin_family = AF_INET;
 	remote_addr.sin_addr.s_addr = htonl(addr);
 	remote_addr.sin_port = htons(port);
+}
+void TCPAssignment::TCPSocket::handlePacket(Packet *packet)
+{
+	switch(this->state)
+	{
+	case ST_READY:
+	case ST_BOUND:
+		/* Cannot handle any packet. Just break. */
+		break;
+	case ST_LISTEN:
+
+		break;
+	case ST_SYN_SENT:
+
+		break;
+	case ST_SYN_RCVD:
+
+		break;
+	case ST_ESTAB:
+
+		break;
+
+	case ST_FIN_WAIT_1:
+
+		break;
+	case ST_FIN_WAIT_2:
+
+		break;
+	case ST_TIME_WAIT:
+
+		break;
+	case ST_CLOSE_WAIT:
+
+		break;
+	case ST_LAST_ACK:
+
+		break;
+
+	case ST_CLOSING:
+
+		break;
+	default:
+		assert(0);
+	}
 }
 
 TCPAssignment::PCBEntry::PCBEntry()
