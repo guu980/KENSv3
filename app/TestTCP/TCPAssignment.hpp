@@ -95,6 +95,7 @@ private:
 
 		PassiveQueue *queues;	/* Only used for LISTENing. */
 
+		TCPSocket();
 		TCPSocket(int domain);
 		~TCPSocket();
 		void setLocalAddr(in_addr_t addr, in_port_t port);
@@ -122,7 +123,7 @@ private:
 		void unblockSystemCall(int ret);
 	};
 	
-	std::unordered_map<in_addr_t, std::pair<int, int>> ip_set[MAX_PORT_NUM];
+	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, std::pair<int, int>>> ip_set;
 	std::unordered_map<int, PCBEntry> proc_table;
 
 	static inline std::pair<in_addr_t, in_port_t> addr_ip_port(struct sockaddr_in *addr)

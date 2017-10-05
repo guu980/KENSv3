@@ -31,8 +31,7 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 {
 	/* Perhaps we can believe STL? */
 	proc_table.clear();
-	for(int i = 0; i<MAX_PORT_NUM; i++)
-		ip_set[i].clear();
+	ip_set.clear();
 }
 
 TCPAssignment::~TCPAssignment()
@@ -127,17 +126,19 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		port = (in_port_t)ntohs(port_buffer);
 
 		int pid, fd;
-		if (!ip_set[port].empty())
+		auto ip_it = ip_set.find(port);
+		if (ip_it != ip_set.end())
 		{
-			if (ip_set[port].begin()->first == INADDR_ANY)
+			auto &sock_map = ip_it->second;
+			if (sock_map.begin()->first == INADDR_ANY)
 			{
-				std::tie(pid, fd) = ip_set[port].begin()->second;
-				getPCBEntry(pid).fd_info.find(fd)->second.handlePacket(packet);
+				std::tie(pid, fd) = sock_map.begin()->second;
+				getPCBEntry(pid).fd_info[fd].handlePacket(packet);
 			}
-			else if (ip_set[port].find(ip) != ip_set[port].end())
+			else if (sock_map.find(ip) != sock_map.end())
 			{
-				std::tie(pid, fd) = ip_set[port].find(ip)->second;
-				getPCBEntry(pid).fd_info.find(fd)->second.handlePacket(packet);
+				std::tie(pid, fd) = sock_map[ip];
+				getPCBEntry(pid).fd_info[fd].handlePacket(packet);
 			}
 		}
 		/* Otherwise, ignore the packet. */
@@ -194,6 +195,8 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 		std::tie(ip, port) = addr_ip_port(sock.getLocalAddr());
 
 		ip_set[port].erase(ip);
+		if (ip_set[port].empty())
+			ip_set.erase(port);
 	}
 
 	fd_info.erase(sock_it);
@@ -218,10 +221,12 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	in_addr_t ip;
 	in_port_t port;
 	std::tie(ip, port) = addr_ip_port((struct sockaddr_in *)addr);
-	if(!ip_set[port].empty()
+	auto ip_it = ip_set.find(port);
+	if(ip_it != ip_set.end()
+		&& !ip_it->second.empty()
 		&& (ip == INADDR_ANY
-			|| ip_set[port].begin()->first == INADDR_ANY
-			|| ip_set[port].find(ip) != ip_set[port].end()))
+			|| ip_it->second.begin()->first == INADDR_ANY
+			|| ip_it->second.find(ip) != ip_it->second.end()))
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -277,7 +282,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	if (connfd != -1)
 	{
 		fd_info.insert({ connfd, TCPSocket(sock.domain) });
-		auto &sock_accept = fd_info.find(connfd)->second;
+		auto &sock_accept = fd_info[connfd];
 		sock_accept.state = ST_ESTAB;
 		sock_accept.context = accept_queue.front(); accept_queue.pop();
 	}
@@ -354,6 +359,12 @@ TCPAssignment::PassiveQueue::~PassiveQueue()
 
 }
 
+TCPAssignment::TCPSocket::TCPSocket() : context()
+{
+	this->domain = AF_INET;
+	this->state = ST_READY;
+	this->queues = nullptr;
+}
 TCPAssignment::TCPSocket::TCPSocket(int domain) : context()
 {
 	this->domain = domain;
