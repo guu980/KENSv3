@@ -22,6 +22,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <queue>
+#include <functional>
 
 namespace E
 {
@@ -58,6 +59,8 @@ private:
 	public:
 		sockaddr local_addr;
 		sockaddr remote_addr;
+		uint32_t seq_num;
+		uint32_t ack_num;
 
 		TCPContext();
 		~TCPContext();
@@ -121,8 +124,7 @@ private:
 	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, TCPSocket *>> ip_set;
 	std::unordered_map<int, PCBEntry> proc_table;
 
-
-	void handle_packet(TCPSocket *sock, Packet *packet);
+	static uint32_t rand_seq_num();
 	static std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
 	static sockaddr tie_addr(in_addr_t ip, in_port_t port);
 
@@ -137,9 +139,9 @@ public:
 		int domain, int protocol);
 	void syscall_close(UUID syscallUUID, int pid,
 		int fd);
-	void syscall_bind(UUID syscallUUID, int pid, 
+	void syscall_bind(UUID syscallUUID, int pid,
 		int sockfd, const struct sockaddr *addr, socklen_t addrlen);
-	void syscall_getsockname(UUID syscallUUID, int pid, 
+	void syscall_getsockname(UUID syscallUUID, int pid,
 		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 
 	void syscall_accept(UUID syscallUUID, int pid,
