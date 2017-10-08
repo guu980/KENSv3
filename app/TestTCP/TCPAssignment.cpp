@@ -196,7 +196,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	{
 		in_addr_t ip;
 		in_port_t port;
-		std::tie(ip, port) = addr_ip_port(sock.getLocalAddr());
+		std::tie(ip, port) = untie_addr(sock.context.local_addr);
 
 		ip_set[port].erase(ip);
 		if (ip_set[port].empty())
@@ -224,7 +224,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 
 	in_addr_t ip;
 	in_port_t port;
-	std::tie(ip, port) = addr_ip_port((struct sockaddr_in *)addr);
+	std::tie(ip, port) = untie_addr(*addr);
 	auto ip_it = ip_set.find(port);
 	if(ip_it != ip_set.end()
 		&& !ip_it->second.empty()
@@ -236,7 +236,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 		return;
 	}
 
-	sock.setLocalAddr(ip, port);
+	sock.context.local_addr = tie_addr(ip, port);
 	sock.state = ST_BOUND;
 	ip_set[port][ip] = { pid, sockfd };
 
@@ -256,8 +256,8 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	}
 	auto &sock = sock_it->second;
 
-	*addr = *((struct sockaddr *)sock.getLocalAddr());
-	*addrlen = (socklen_t)sizeof(*sock.getLocalAddr());
+	*addr = sock.context.local_addr;
+	*addrlen = (socklen_t)sizeof(sock.context.local_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
@@ -275,7 +275,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	}
 	auto &sock = sock_it->second;
 
-	auto &accept_queue = sock.queues->accept_queue;
+	auto &accept_queue = sock.queue->accept_queue;
 	if(accept_queue.empty())
 	{
 		//pcb.blockSystemCall(ACCEPT, syscallUUID, sockfd);
@@ -311,9 +311,10 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
+	auto &sock = sock_it->second;
 
-	*addr = *((struct sockaddr *)sock_it->second.getRemoteAddr());
-	*addrlen = (socklen_t)sizeof(*sock_it->second.getRemoteAddr());
+	*addr = sock.context.remote_addr;
+	*addrlen = (socklen_t)sizeof(sock.context.remote_addr);
 	this->returnSystemCall(syscallUUID, 0);
 }
 
@@ -331,9 +332,11 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	auto &sock = sock_it->second;
 
 	sock.state = ST_LISTEN;
-	sock.queues = new PassiveQueue(backlog);
+	sock.queue = new PassiveQueue(backlog);
 	this->returnSystemCall(syscallUUID, 0);
 }
+
+
 
 TCPAssignment::TCPContext::TCPContext()
 {
@@ -345,6 +348,7 @@ TCPAssignment::TCPContext::~TCPContext()
 
 }
 
+
 TCPAssignment::PassiveQueue::PassiveQueue(int backlog) : listen_queue(), accept_queue()
 {
 	this->backlog = backlog;
@@ -355,41 +359,16 @@ TCPAssignment::PassiveQueue::~PassiveQueue()
 
 }
 
-TCPAssignment::TCPSocket::TCPSocket() : context()
-{
-	this->domain = AF_INET;
-	this->state = ST_READY;
-	this->queues = nullptr;
-}
+
 TCPAssignment::TCPSocket::TCPSocket(int domain) : context()
 {
 	this->domain = domain;
 	this->state = ST_READY;
-	this->queues = nullptr;
+	this->queue = nullptr;
 }
 TCPAssignment::TCPSocket::~TCPSocket()
 {
-	delete queues;
-}
-void TCPAssignment::TCPSocket::setLocalAddr(in_addr_t addr, in_port_t port)
-{
-	context.local_addr.sin_family = AF_INET;
-	context.local_addr.sin_addr.s_addr = htonl(addr);
-	context.local_addr.sin_port = htons(port);
-}
-void TCPAssignment::TCPSocket::setRemoteAddr(in_addr_t addr, in_port_t port)
-{
-	context.remote_addr.sin_family = AF_INET;
-	context.remote_addr.sin_addr.s_addr = htonl(addr);
-	context.remote_addr.sin_port = htons(port);
-}
-struct sockaddr_in *TCPAssignment::TCPSocket::getLocalAddr()
-{
-	return &this->context.local_addr;
-}
-struct sockaddr_in *TCPAssignment::TCPSocket::getRemoteAddr()
-{
-	return &this->context.remote_addr;
+	delete queue;
 }
 
 TCPAssignment::PCBEntry::PCBEntry()
@@ -400,6 +379,23 @@ TCPAssignment::PCBEntry::PCBEntry()
 TCPAssignment::PCBEntry::~PCBEntry()
 {
 
+}
+
+
+
+std::pair<in_addr_t, in_port_t> TCPAssignment::untie_addr(sockaddr addr)
+{
+	return { ntohl(((sockaddr_in *)&addr)->sin_addr.s_addr), ntohs(((sockaddr_in *)&addr)->sin_port) };
+}
+
+sockaddr TCPAssignment::tie_addr(in_addr_t ip, in_port_t port)
+{
+	sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = htonl(ip);
+	return *(sockaddr *)(&addr);
 }
 
 }

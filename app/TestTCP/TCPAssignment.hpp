@@ -56,8 +56,8 @@ private:
 	class TCPContext
 	{
 	public:
-		struct sockaddr_in local_addr;
-		struct sockaddr_in remote_addr;
+		sockaddr local_addr;
+		sockaddr remote_addr;
 
 		TCPContext();
 		~TCPContext();
@@ -75,8 +75,13 @@ private:
 			std::size_t operator()(const TCPContext &context) const
 			{
 				/* Most time, the local address will be the same. */
-				std::size_t h1 = std::hash<in_addr_t>{}(context.remote_addr.sin_addr.s_addr);
-				std::size_t h2 = std::hash<in_port_t>{}(context.remote_addr.sin_port);
+
+				in_addr_t ip;
+				in_port_t port;
+				std::tie(ip, port) = untie_addr(context.remote_addr);
+
+				std::size_t h1 = std::hash<in_addr_t>{}(ip);
+				std::size_t h2 = std::hash<in_port_t>{}(port);
 				return h1 ^ (h2 << 1);
 			}
 		};
@@ -93,15 +98,10 @@ private:
 		enum TCPState state;
 		TCPContext context;
 
-		PassiveQueue *queues;	/* Only used for LISTENing. */
+		PassiveQueue *queue;	/* Only used for LISTENing. */
 
-		TCPSocket();
-		TCPSocket(int domain);
+		TCPSocket(int domain = AF_INET);
 		~TCPSocket();
-		void setLocalAddr(in_addr_t addr, in_port_t port);
-		void setRemoteAddr(in_addr_t addr, in_port_t port);
-		struct sockaddr_in *getLocalAddr();
-		struct sockaddr_in *getRemoteAddr();
 	};
 
 	class PCBEntry
@@ -117,14 +117,13 @@ private:
 		PCBEntry();
 		~PCBEntry();
 	};
-	
+
 	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, std::pair<int, int>>> ip_set;
 	std::unordered_map<int, PCBEntry> proc_table;
 
-	static inline std::pair<in_addr_t, in_port_t> addr_ip_port(struct sockaddr_in *addr)
-	{
-		return { ntohl(addr->sin_addr.s_addr), ntohs(addr->sin_port) };
-	}    
+
+	static std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
+	static sockaddr tie_addr(in_addr_t ip, in_port_t port);
 
 public:
 	TCPAssignment(Host* host);
