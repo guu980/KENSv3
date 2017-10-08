@@ -118,10 +118,11 @@ private:
 		~PCBEntry();
 	};
 
-	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, std::pair<int, int>>> ip_set;
+	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, TCPSocket *>> ip_set;
 	std::unordered_map<int, PCBEntry> proc_table;
 
 
+	void handle_packet(TCPSocket *sock, Packet *packet);
 	static std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
 	static sockaddr tie_addr(in_addr_t ip, in_port_t port);
 

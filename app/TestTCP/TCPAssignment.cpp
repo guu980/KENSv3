@@ -99,57 +99,38 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 {
-	if(fromModule.compare("IPv4") == 0)
+	assert(fromModule == "IPv4");
+	/* Packet arrived from IPv4 Module!
+	 * (1) Read from packet local and remote addresses.
+	 * (2) Forward the packet to corresponding TCPSocket.
+	 * (3) Handle the packet according to the state of the socket.
+	 */
+
+	const size_t ip_start = 14;  /* Size of Ethernet header */
+
+	uint8_t ihl_buffer;
+	packet->readData(ip_start, &ihl_buffer, 1);
+	size_t ihl = (ihl_buffer & 0x0f) << 2;  /* Size of the IP header */
+	size_t tcp_start = ip_start + ihl;
+
+	uint32_t ip_buffer;
+	uint16_t port_buffer;
+	packet->readData(ip_start + 16, &ip_buffer, 4);
+	packet->readData(tcp_start + 2, &port_buffer, 2);
+
+	in_addr_t ip = (in_addr_t)ntohl(ip_buffer);
+	in_port_t port = (in_port_t)ntohs(port_buffer);
+
+	auto ip_it = ip_set.find(port);
+	if (ip_it != ip_set.end())  /* Otherwise, ignore the packet. */
 	{
-		/* Packet arrived from IPv4 Module!
-		 * (1) Read from packet local and remote addresses.
-		 * (2) Forward the packet to corresponding TCPSocket.
-		 * (3) Handle the packet according to the state of the socket.
-		 */
+		auto &sock_map = ip_it->second;
+		auto addr_sock_it = sock_map.find(INADDR_ANY);
+		if(addr_sock_it == sock_map.end())
+			addr_sock_it = sock_map.find(ip);
 
-		/*
-		size_t ip_start = 14;
-		size_t ihl;
-		uint8_t ihl_buffer;
-		uint32_t ip_buffer;
-		in_addr_t ip;
-
-		size_t tcp_start;
-		uint16_t port_buffer;
-		in_port_t port;
-
-		packet->readData(ip_start, &ihl_buffer, 1);
-		ihl = (ihl_buffer & 0x0f) << 2;
-		tcp_start = ip_start + ihl;
-
-		packet->readData(ip_start + 16, &ip_buffer, 4);
-		packet->readData(tcp_start + 2, &port_buffer, 2);
-		ip = (in_addr_t)ntohl(ip_buffer);
-		port = (in_port_t)ntohs(port_buffer);
-
-		int pid, fd;
-		auto ip_it = ip_set.find(port);
-		if (ip_it != ip_set.end())
-		{
-			auto &sock_map = ip_it->second;
-			if (sock_map.begin()->first == INADDR_ANY)
-			{
-				std::tie(pid, fd) = sock_map.begin()->second;
-				proc_table[pid].fd_info[fd].handlePacket(packet);
-			}
-			else if (sock_map.find(ip) != sock_map.end())
-			{
-				std::tie(pid, fd) = sock_map[ip];
-				proc_table[pid].fd_info[fd].handlePacket(packet);
-			}
-		}
-		*/
-
-		/* Otherwise, ignore the packet. */
-	}
-	else
-	{
-		assert(0);
+		if(addr_sock_it != sock_map.end())  /* Otherwise, ignore the packet. */
+			handle_packet(addr_sock_it->second, packet);
 	}
 }
 
@@ -161,8 +142,7 @@ void TCPAssignment::timerCallback(void* payload)
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, 
 		int domain, int protocol)
 {
-	//assert(domain == AF_INET && protocol == IPPROTO_TCP);
-	if(protocol != IPPROTO_TCP)
+	if(domain != AF_INET || protocol != IPPROTO_TCP)
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -183,7 +163,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	int fd)
 {
 	auto &fd_info = proc_table[pid].fd_info;
-
+ 
 	auto sock_it = fd_info.find(fd);
 	if(sock_it == fd_info.end())
 	{
@@ -212,7 +192,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, 
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	auto &fd_info = proc_table[pid].fd_info;
+	auto &fd_info = proc_table[pid].fd_info	;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state != ST_READY)
@@ -229,7 +209,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	if(ip_it != ip_set.end()
 		&& !ip_it->second.empty()
 		&& (ip == INADDR_ANY
-			|| ip_it->second.begin()->first == INADDR_ANY
+			|| ip_it->second.find(INADDR_ANY) != ip_it->second.end()
 			|| ip_it->second.find(ip) != ip_it->second.end()))
 	{
 		this->returnSystemCall(syscallUUID, -1);
@@ -238,7 +218,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 
 	sock.context.local_addr = tie_addr(ip, port);
 	sock.state = ST_BOUND;
-	ip_set[port][ip] = { pid, sockfd };
+	ip_set[port][ip] = &sock;
 
 	this->returnSystemCall(syscallUUID, 0);
 }
@@ -337,6 +317,11 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 }
 
 
+void TCPAssignment::handle_packet(TCPSocket *sock, Packet *packet)
+{
+
+}
+
 
 TCPAssignment::TCPContext::TCPContext()
 {
@@ -380,7 +365,6 @@ TCPAssignment::PCBEntry::~PCBEntry()
 {
 
 }
-
 
 
 std::pair<in_addr_t, in_port_t> TCPAssignment::untie_addr(sockaddr addr)
