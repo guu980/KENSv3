@@ -102,13 +102,10 @@ private:
 		void setRemoteAddr(in_addr_t addr, in_port_t port);
 		struct sockaddr_in *getLocalAddr();
 		struct sockaddr_in *getRemoteAddr();
-		void handlePacket(Packet *packet);
 	};
 
 	class PCBEntry
 	{
-	private:
-		TCPAssignment *host;
 	public:
 		std::unordered_map<int, TCPSocket> fd_info;
 
@@ -117,10 +114,8 @@ private:
 		UUID blockedUUID;
 		int blockfd;		/* Which socket blocked the system call? */
 
-		PCBEntry(TCPAssignment *host);
+		PCBEntry();
 		~PCBEntry();
-		void blockSystemCall(enum SystemCall blockedNum, UUID blockedUUID, int blockfd);
-		void unblockSystemCall(int ret);
 	};
 	
 	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, std::pair<int, int>>> ip_set;
@@ -129,9 +124,7 @@ private:
 	static inline std::pair<in_addr_t, in_port_t> addr_ip_port(struct sockaddr_in *addr)
 	{
 		return { ntohl(addr->sin_addr.s_addr), ntohs(addr->sin_port) };
-	}
-
-	PCBEntry &getPCBEntry(int pid);
+	}    
 
 public:
 	TCPAssignment(Host* host);

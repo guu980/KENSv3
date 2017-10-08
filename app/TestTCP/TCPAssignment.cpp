@@ -106,6 +106,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		 * (2) Forward the packet to corresponding TCPSocket.
 		 * (3) Handle the packet according to the state of the socket.
 		 */
+
+		/*
 		size_t ip_start = 14;
 		size_t ihl;
 		uint8_t ihl_buffer;
@@ -133,14 +135,16 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			if (sock_map.begin()->first == INADDR_ANY)
 			{
 				std::tie(pid, fd) = sock_map.begin()->second;
-				getPCBEntry(pid).fd_info[fd].handlePacket(packet);
+				proc_table[pid].fd_info[fd].handlePacket(packet);
 			}
 			else if (sock_map.find(ip) != sock_map.end())
 			{
 				std::tie(pid, fd) = sock_map[ip];
-				getPCBEntry(pid).fd_info[fd].handlePacket(packet);
+				proc_table[pid].fd_info[fd].handlePacket(packet);
 			}
 		}
+		*/
+
 		/* Otherwise, ignore the packet. */
 	}
 	else
@@ -168,7 +172,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 
 	if(fd != -1)
 	{
-		getPCBEntry(pid).fd_info.insert({ fd, TCPSocket(domain) });
+		proc_table[pid].fd_info.insert({ fd, TCPSocket(domain) });
 	}
 
 	this->returnSystemCall(syscallUUID, fd);
@@ -178,7 +182,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, 
 	int fd)
 {
-	auto &fd_info = getPCBEntry(pid).fd_info;
+	auto &fd_info = proc_table[pid].fd_info;
 
 	auto sock_it = fd_info.find(fd);
 	if(sock_it == fd_info.end())
@@ -208,7 +212,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, 
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	auto &fd_info = getPCBEntry(pid).fd_info;
+	auto &fd_info = proc_table[pid].fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state != ST_READY)
@@ -242,7 +246,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, 
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto &fd_info = getPCBEntry(pid).fd_info;
+	auto &fd_info = proc_table[pid].fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state == ST_READY)
@@ -260,7 +264,7 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	PCBEntry &pcb = getPCBEntry(pid);
+	PCBEntry &pcb = proc_table[pid];
 	auto &fd_info = pcb.fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
@@ -274,7 +278,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	auto &accept_queue = sock.queues->accept_queue;
 	if(accept_queue.empty())
 	{
-		pcb.blockSystemCall(ACCEPT, syscallUUID, sockfd);
+		//pcb.blockSystemCall(ACCEPT, syscallUUID, sockfd);
 		return;
 	}
 
@@ -299,7 +303,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto &fd_info = getPCBEntry(pid).fd_info;
+	auto &fd_info = proc_table[pid].fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state != ST_ESTAB)
@@ -316,7 +320,7 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
-	auto &fd_info = getPCBEntry(pid).fd_info;
+	auto &fd_info = proc_table[pid].fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second.state != ST_BOUND)
@@ -329,14 +333,6 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	sock.state = ST_LISTEN;
 	sock.queues = new PassiveQueue(backlog);
 	this->returnSystemCall(syscallUUID, 0);
-}
-
-TCPAssignment::PCBEntry &TCPAssignment::getPCBEntry(int pid)
-{
-	auto pcb_it = proc_table.find(pid);
-	if (pcb_it == proc_table.end())
-		pcb_it = proc_table.emplace(pid, this).first;
-	return pcb_it->second;
 }
 
 TCPAssignment::TCPContext::TCPContext()
@@ -395,69 +391,15 @@ struct sockaddr_in *TCPAssignment::TCPSocket::getRemoteAddr()
 {
 	return &this->context.remote_addr;
 }
-void TCPAssignment::TCPSocket::handlePacket(Packet *packet)
+
+TCPAssignment::PCBEntry::PCBEntry()
 {
-	switch(this->state)
-	{
-	case ST_LISTEN:
-
-		break;
-	case ST_SYN_SENT:
-
-		break;
-	case ST_SYN_RCVD:
-
-		break;
-	case ST_ESTAB:
-
-		break;
-
-	case ST_FIN_WAIT_1:
-
-		break;
-	case ST_FIN_WAIT_2:
-
-		break;
-	case ST_TIME_WAIT:
-
-		break;
-	case ST_CLOSE_WAIT:
-
-		break;
-	case ST_LAST_ACK:
-
-		break;
-
-	case ST_CLOSING:
-
-		break;
-	default:
-		;
-		/* Do nothing. */
-	}
-}
-
-TCPAssignment::PCBEntry::PCBEntry(TCPAssignment *host)
-{
-	this->host = host;
 	this->fd_info.clear();
 	this->blocked = false;
 }
 TCPAssignment::PCBEntry::~PCBEntry()
 {
 
-}
-void TCPAssignment::PCBEntry::blockSystemCall(enum SystemCall blockedNum, UUID blockedUUID, int blockfd)
-{
-	this->blocked = true;
-	this->blockedNum = blockedNum;
-	this->blockedUUID = blockedUUID;
-	this->blockfd = blockfd;
-}
-void TCPAssignment::PCBEntry::unblockSystemCall(int ret)
-{
-	this->blocked = false;
-	this->host->returnSystemCall(this->blockedUUID, ret);
 }
 
 }
