@@ -123,11 +123,13 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	packet->readData(tcp_start + 0, &port_buffer, 2);
 	in_addr_t remote_ip = (in_addr_t)ntohl(ip_buffer);
 	in_port_t remote_port = (in_port_t)ntohs(port_buffer);
+	sockaddr remote_addr = tie_addr(remote_ip, remote_port);
 
 	packet->readData(ip_start + 16, &ip_buffer, 4);
 	packet->readData(tcp_start + 2, &port_buffer, 2);
 	in_addr_t local_ip = (in_addr_t)ntohl(ip_buffer);
 	in_port_t local_port = (in_port_t)ntohs(port_buffer);
+	sockaddr local_addr = tie_addr(local_ip, local_port);
 
 	auto ip_it = ip_set.find(local_port);
 	if (ip_it == ip_set.end())
@@ -191,18 +193,21 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	switch(sock->state)
 	{
 		case ST_READY: 		/* Socket is ready. */
+			this->freePacket(packet);
 			freePacket(new_packet);
 			break;
 
 		case ST_BOUND:		/* Socket is bound. */
+			this->freePacket(packet);
 			freePacket(new_packet);
 			break;
 
 		case ST_LISTEN:		/* Connect ready. Only for server. */
+			this->freePacket(packet);
 			if(flag & SYN)
 			{
-				sock->context.local_addr = tie_addr(local_ip, local_port);
-				sock->context.remote_addr = tie_addr(remote_ip, remote_port);
+				sock->context.local_addr = local_addr;
+				sock->context.remote_addr = remote_addr;
 				sock->context.seq_num = seq_num;
 
 				new_flag = SYN | ACK;
@@ -226,6 +231,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 
 		case ST_SYN_SENT:	/* 3-way handshake, client. */
+			this->freePacket(packet);
 			if((flag & SYN) && (flag & ACK))
 			{
 				if(ack_num != sock->context.seq_num + 1)
@@ -255,31 +261,44 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 
 		case ST_SYN_RCVD:	/* 3-way handshake, server. */
-
-			if(flag & ACK)
+			freePacket(new_packet);
+			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
+				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
 			{
-				// accept_queue
-
-				if(ack_num != sock->context.seq_num + 1)
+				this->freePacket(packet);
+				if(flag & ACK)
 				{
-					freePacket(new_packet);
-					break;
+					if(ack_num != sock->context.seq_num + 1)
+					{
+						break;
+					}
+
+					sock->queue->accept_queue.push(sock->context);
+					sock->state = ST_LISTEN;
+
+					if(!sock->queue->listen_queue.empty())
+					{
+						new_packet = sock->queue->listen_queue.front();
+						sock->queue->listen_queue.pop();
+						packetArrived("IPv4", new_packet);
+					}
 				}
-
-				//sock->queue->accept_queue.push(sock->context);
-
-
-
-				freePacket(new_packet);
 			}
-			else if(flag & SYN)
+			else
 			{
-				// backlog
+				if(flag & SYN)
+				{
+					if((int)sock->queue->listen_queue.size() < sock->queue->backlog)
+					{
+						sock->queue->listen_queue.push(packet);
+					}
+				}
+				this->freePacket(packet);
 			}
-
 			break;
 
 		case ST_ESTAB:		/* Connection established. */
+			this->freePacket(packet);
 			assert(0);  // Read/Write not implemented!
 			break;
 
@@ -294,8 +313,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		default:
 			assert(0);
 	}
-
-	this->freePacket(packet);
 }
 
 void TCPAssignment::timerCallback(void* payload)
@@ -527,7 +544,8 @@ TCPAssignment::PCBEntry::~PCBEntry()
 
 uint32_t TCPAssignment::rand_seq_num()
 {
-	return rand();
+	static uint32_t cnt = 0;
+	return cnt++;
 }
 
 std::pair<in_addr_t, in_port_t> TCPAssignment::untie_addr(sockaddr addr)
