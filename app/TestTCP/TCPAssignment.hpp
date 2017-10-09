@@ -36,6 +36,11 @@ private:
 
 	const static int MAX_PORT_NUM = 65536;
 
+	const int ACK = 1 << 4;
+	const int RST = 1 << 2;
+	const int SYN = 1 << 1;
+	const int FIN = 1 << 0;
+
 	enum TCPState
 	{
 		ST_READY, 		/* Socket is ready. */
@@ -101,6 +106,9 @@ private:
 		enum TCPState state;
 		TCPContext context;
 
+		bool blocked;
+		UUID blockedUUID;
+
 		PassiveQueue *queue;	/* Only used for LISTENing. */
 
 		TCPSocket(int domain = AF_INET);
@@ -113,15 +121,35 @@ private:
 		std::unordered_map<int, TCPSocket> fd_info;
 
 		bool blocked;
-		enum SystemCall blockedNum;
-		UUID blockedUUID;
-		int blockfd;		/* Which socket blocked the system call? */
+		enum SystemCall syscall;
+		UUID syscallUUID;
+		union syscallParam
+		{
+			struct
+			{
+				int fd;
+			} closeParam;
+			struct
+			{
+				int sockfd;
+				struct sockaddr *addr;
+				socklen_t *addrlen;
+			} acceptParam;
+			struct
+			{
+				int sockfd;
+				const struct sockaddr *addr;
+				socklen_t addrlen;
+			} connectParam;
+		} param;
 
 		PCBEntry();
 		~PCBEntry();
+		void blockSyscall(enum SystemCall syscall, UUID syscallUUID, syscallParam &param);
+		void unblockSyscall();
 	};
 
-	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, TCPSocket *>> ip_set;
+	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, std::pair<int, int>>> ip_set;
 	std::unordered_map<int, PCBEntry> proc_table;
 
 	static uint32_t rand_seq_num();

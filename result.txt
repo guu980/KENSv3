@@ -1,0 +1,25 @@
+Running main() from gtest_main.cc
+Note: Google Test filter = TestEnv_Reliable.TestAccept_*:TestEnv_Any.TestAccept_*:TestEnv_Any.TestConnect_BeforeAccept:TestEnv_Any.TestConnect_AfterAccept:TestEnv_Any.TestClose_*
+[==========] Running 14 tests from 2 test cases.
+[----------] Global test environment set-up.
+[----------] 2 tests from TestEnv_Reliable
+[ RUN      ] TestEnv_Reliable.TestAccept_Backlog1
+[       OK ] TestEnv_Reliable.TestAccept_Backlog1 (92 ms)
+[ RUN      ] TestEnv_Reliable.TestAccept_Backlog2
+[       OK ] TestEnv_Reliable.TestAccept_Backlog2 (58 ms)
+[----------] 2 tests from TestEnv_Reliable (150 ms total)
+
+[----------] 12 tests from TestEnv_Any
+[ RUN      ] TestEnv_Any.TestAccept_BeforeAccept
+[       OK ] TestEnv_Any.TestAccept_BeforeAccept (5 ms)
+[ RUN      ] TestEnv_Any.TestAccept_AfterAccept
+[       OK ] TestEnv_Any.TestAccept_AfterAccept (4 ms)
+[ RUN      ] TestEnv_Any.TestAccept_MultipleInterface1
+[       OK ] TestEnv_Any.TestAccept_MultipleInterface1 (30 ms)
+[ RUN      ] TestEnv_Any.TestAccept_MultipleInterface2
+[       OK ] TestEnv_Any.TestAccept_MultipleInterface2 (22 ms)
+[ RUN      ] TestEnv_Any.TestConnect_BeforeAccept
+[       OK ] TestEnv_Any.TestConnect_BeforeAccept (7 ms)
+[ RUN      ] TestEnv_Any.TestConnect_AfterAccept
+[       OK ] TestEnv_Any.TestConnect_AfterAccept (7 ms)
+[ RUN      ] TestEnv_Any.TestClose_Connect_CloseFirst
