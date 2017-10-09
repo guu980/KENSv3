@@ -506,7 +506,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	auto &fd_info = pcb.fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if(sock_it == fd_info.end() || sock_it->second.state == ST_ESTAB)
+	if(sock_it == fd_info.end() || sock_it->second.state == ST_ESTAB || true)
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
