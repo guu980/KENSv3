@@ -166,68 +166,26 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	uint8_t flag;
 	packet->readData(tcp_start + 13, &flag, 1);
 
-	size_t header_size = tcp_start + data_ofs;
-
-	Packet *new_packet = allocatePacket(header_size);
-
-	ip_buffer = htonl(local_ip);
-	new_packet->writeData(ip_start + 12, &ip_buffer, 4);
-	ip_buffer = htonl(remote_ip);
-	new_packet->writeData(ip_start + 16, &ip_buffer, 4);
-
-	port_buffer = htons(local_port);
-	new_packet->writeData(tcp_start + 0, &port_buffer, 2);
-	port_buffer = htons(remote_port);
-	new_packet->writeData(tcp_start + 2, &port_buffer, 2);
-
-	uint8_t new_data_ofs_ns = 5 << 4;
-	uint16_t window_size = htons(51200);
-	new_packet->writeData(tcp_start + 12, &new_data_ofs_ns, 1);
-	new_packet->writeData(tcp_start + 14, &window_size, 2);
-
-	uint8_t tcp_header_buffer[20];
-	uint16_t checksum;
-	uint8_t new_flag;
-	uint32_t new_seq_num;
-	uint32_t new_ack_num;
-
-	//if (sock.state != ST_BOUND) fprintf(stderr, "Packet state: %d\n", sock.state);
 	switch(sock.state)
 	{
 		case ST_READY: 		/* Socket is ready. */
 			this->freePacket(packet);
-			freePacket(new_packet);
 			break;
 
 		case ST_BOUND:		/* Socket is bound. */
 			this->freePacket(packet);
-			freePacket(new_packet);
 			break;
 
 		case ST_LISTEN:		/* Connect ready. Only for server. */
 			this->freePacket(packet);
 			if(flag & SYN)
 			{
-
-				new_flag = SYN | ACK;
-				new_packet->writeData(tcp_start + 13, &new_flag, 1);
-
-				new_seq_num = htonl(rand_seq_num());
-				new_packet->writeData(tcp_start + 4, &new_seq_num, 4);
-				new_ack_num = htonl(seq_num + 1);
-				new_packet->writeData(tcp_start + 8, &new_ack_num, 4);
-
-				new_packet->readData(tcp_start, tcp_header_buffer, 20);
-				checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-				checksum = ~checksum;
-				checksum = htons(checksum);
-				new_packet->writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
-
 				sock.context.local_addr = local_addr;
 				sock.context.remote_addr = remote_addr;
-				sock.context.seq_num = ntohl(new_seq_num);
+				sock.context.seq_num = rand_seq_num();
+				sock.context.ack_num = seq_num + 1;
 
-				sendPacket("IPv4", new_packet);
+				sendPacket("IPv4", make_packet(sock.context, SYN | ACK));
 
 				sock.state = ST_SYN_RCVD;
 			}
@@ -240,25 +198,14 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				if(ack_num != sock.context.seq_num + 1)
 				{
 					// connect fail
-					freePacket(new_packet);
 					this->returnSystemCall(pcb.syscallUUID, -1);
 					sock.state = ST_BOUND;
 					break;
 				}
 
-				new_flag = ACK;
-				new_packet->writeData(tcp_start + 13, &new_flag, 1);
+				sock.context.ack_num = seq_num + 1;
 
-				new_ack_num = htonl(seq_num + 1);
-				new_packet->writeData(tcp_start + 8, &new_ack_num, 4);
-
-				new_packet->readData(tcp_start, tcp_header_buffer, 20);
-				checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-				checksum = ~checksum;
-				checksum = htons(checksum);
-				new_packet->writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
-
-				sendPacket("IPv4", new_packet);
+				sendPacket("IPv4", make_packet(sock.context, ACK));
 
 				assert(pcb.blocked && pcb.syscall == CONNECT);
 
@@ -272,7 +219,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 
 		case ST_SYN_RCVD:	/* 3-way handshake, server. */
-			freePacket(new_packet);
 			if( untie_addr(sock.context.local_addr) == std::make_pair(local_ip, local_port) &&
 				untie_addr(sock.context.remote_addr) == std::make_pair(remote_ip, remote_port))
 			{
@@ -312,7 +258,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 					if(!sock.queue->listen_queue.empty())
 					{
-						new_packet = sock.queue->listen_queue.front();
+						Packet *new_packet = sock.queue->listen_queue.front();
 						sock.queue->listen_queue.pop();
 						packetArrived("IPv4", new_packet);
 					}
@@ -324,7 +270,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				{
 					if((int)sock.queue->listen_queue.size() + 1 < sock.queue->backlog)
 					{
-						new_packet = clonePacket(packet);
+						Packet *new_packet = clonePacket(packet);
 						sock.queue->listen_queue.push(new_packet);
 					}
 				}
@@ -388,22 +334,38 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 		return;
 	}
 	auto &sock = sock_it->second;
-
-	if(sock.state != ST_READY)
+/*
+	if(sock.state == ST_ESTAB || sock.state == ST_SYN_RCVD)
 	{
-		in_addr_t ip;
-		in_port_t port;
-		std::tie(ip, port) = untie_addr(sock.context.local_addr);
 
-		ip_set[port].erase(ip);
-		if (ip_set[port].empty())
-			ip_set.erase(port);
 	}
+	else if(sock.state == ST_CLOSE_WAIT)
+	{
 
-	fd_info.erase(sock_it);
+	}
+	else if(sock.state == ST_TIME_WAIT)
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	else*/
+	{
+		if(sock.state != ST_READY)
+		{
+			in_addr_t ip;
+			in_port_t port;
+			std::tie(ip, port) = untie_addr(sock.context.local_addr);
 
-	this->removeFileDescriptor(pid, fd);
-	this->returnSystemCall(syscallUUID, 0);
+			ip_set[port].erase(ip);
+			if (ip_set[port].empty())
+				ip_set.erase(port);
+		}
+
+		fd_info.erase(sock_it);
+
+		this->removeFileDescriptor(pid, fd);
+		this->returnSystemCall(syscallUUID, 0);		
+	}
 }
 
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
@@ -544,44 +506,11 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	else
 		std::tie(local_ip, local_port) = untie_addr(sock.context.local_addr);
 
-	size_t ip_start = 14;
-	size_t tcp_start = 34;
-	size_t data_ofs = 20;
+	sock.context.seq_num = rand_seq_num();
 
-	Packet *packet = this->allocatePacket(tcp_start + data_ofs);
-
-	uint32_t ip_buffer = htonl(local_ip);
-	packet->writeData(ip_start + 12, &ip_buffer, 4);
-	ip_buffer = htonl(remote_ip);
-	packet->writeData(ip_start + 16, &ip_buffer, 4);
-
-	uint16_t port_buffer = htons(local_port);
-	packet->writeData(tcp_start + 0, &port_buffer, 2);
-	port_buffer = htons(remote_port);
-	packet->writeData(tcp_start + 2, &port_buffer, 2);
-
-	uint8_t new_data_ofs_ns = 5 << 4;
-	uint16_t window_size = htons(51200);
-	packet->writeData(tcp_start + 12, &new_data_ofs_ns, 1);
-	packet->writeData(tcp_start + 14, &window_size, 2);
-
-	uint8_t flag = SYN;
-	packet->writeData(tcp_start + 13, &flag, 1);
-
-	uint32_t seq_num = htonl(rand_seq_num());
-	packet->writeData(tcp_start + 4, &seq_num, 4);
-
-	uint8_t tcp_header_buffer[20];
-	packet->readData(tcp_start, tcp_header_buffer, 20);
-	uint16_t checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-	checksum = ~checksum;
-	checksum = htons(checksum);
-	packet->writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
-
-	this->sendPacket("IPv4", packet);
+	this->sendPacket("IPv4", make_packet(sock.context, SYN));
 
 	sock.state = ST_SYN_SENT;
-	sock.context.seq_num = ntohl(seq_num);
 
 	PCBEntry::syscallParam param;
 	param.connectParam = { sockfd, addr, addrlen };
@@ -622,6 +551,51 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	sock.state = ST_LISTEN;
 	sock.queue = new PassiveQueue(backlog);
 	this->returnSystemCall(syscallUUID, 0);
+}
+
+Packet *TCPAssignment::make_packet(TCPContext &context, uint8_t flag)
+{
+	in_addr_t local_ip, remote_ip;
+	in_port_t local_port, remote_port;
+	std::tie(local_ip, local_port) = untie_addr(context.local_addr);
+	std::tie(remote_ip, remote_port) = untie_addr(context.remote_addr);
+
+	size_t ip_start = 14;
+	size_t tcp_start = 34;
+	size_t data_ofs = 20;
+
+	Packet *packet = this->allocatePacket(tcp_start + data_ofs);
+
+	uint32_t ip_buffer = htonl(local_ip);
+	packet->writeData(ip_start + 12, &ip_buffer, 4);
+	ip_buffer = htonl(remote_ip);
+	packet->writeData(ip_start + 16, &ip_buffer, 4);
+
+	uint16_t port_buffer = htons(local_port);
+	packet->writeData(tcp_start + 0, &port_buffer, 2);
+	port_buffer = htons(remote_port);
+	packet->writeData(tcp_start + 2, &port_buffer, 2);
+
+	uint8_t new_data_ofs_ns = 5 << 4;
+	uint16_t window_size = htons(51200);
+	packet->writeData(tcp_start + 12, &new_data_ofs_ns, 1);
+	packet->writeData(tcp_start + 14, &window_size, 2);
+	packet->writeData(tcp_start + 13, &flag, 1);
+
+	uint32_t new_seq_num = htonl(context.seq_num);
+	packet->writeData(tcp_start + 4, &new_seq_num, 4);
+
+	uint32_t new_ack_num = htonl(context.ack_num);
+	packet->writeData(tcp_start + 8, &new_ack_num, 4);
+
+	uint8_t tcp_header_buffer[20];
+	packet->readData(tcp_start, tcp_header_buffer, 20);
+	uint16_t checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
+	checksum = ~checksum;
+	checksum = htons(checksum);
+	packet->writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+
+	return packet;
 }
 
 

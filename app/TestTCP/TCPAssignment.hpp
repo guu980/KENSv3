@@ -156,6 +156,8 @@ private:
 	static std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
 	static sockaddr tie_addr(in_addr_t ip, in_port_t port);
 
+	Packet *make_packet(TCPContext &context, uint8_t flag);
+
 public:
 	TCPAssignment(Host* host);
 	virtual void initialize();
