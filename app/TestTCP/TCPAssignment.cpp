@@ -33,6 +33,8 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 		TimerModule(host->getSystem())
 {
 	/* Perhaps we can believe STL? */
+	conn_map.clear();
+	listen_map.clear();
 	proc_table.clear();
 	ip_set.clear();
 	srand(time(NULL));
@@ -133,32 +135,27 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	in_port_t local_port = (in_port_t)ntohs(port_buffer);
 	sockaddr local_addr = tie_addr(local_ip, local_port);
 
-	auto ip_it = ip_set.find(local_port);
-	if (ip_it == ip_set.end())
-	{
-		this->freePacket(packet);
-		return;
-	}
-	auto &sock_map = ip_it->second;
-	auto addr_sock_it = sock_map.find(INADDR_ANY);
-	if(addr_sock_it == sock_map.end())
-		addr_sock_it = sock_map.find(local_ip);
-	if(addr_sock_it == sock_map.end())
-	{
-		this->freePacket(packet);
-		return;
-	}
+	TCPSocket *sock;
+	TCPContext context(local_addr, remote_addr);
 
-	int pid, fd;
-	std::tie(pid, fd) = addr_sock_it->second;
-	auto &pcb = proc_table[pid];
-	auto sock = pcb.fd_info[fd];
-
-	if (sock->state == ST_LISTEN || sock->state == ST_SYN_RCVD)
+	auto sock_it = conn_map.find(context);
+	if (sock_it != conn_map.end())
 	{
-		auto accept_it = sock->queue->accept_map.find({ remote_ip, remote_port });
-		if (accept_it != sock->queue->accept_map.end())
-			sock = accept_it->second;
+		sock = sock_it->second;
+	}
+	else
+	{
+		auto addr_sock_it = listen_map.find({ INADDR_ANY, local_port });
+		if (addr_sock_it == listen_map.end())
+			addr_sock_it = listen_map.find({ local_ip, local_port });
+
+		if(addr_sock_it == listen_map.end())
+		{
+			this->freePacket(packet);
+			return;
+		}
+
+		sock = addr_sock_it->second;
 	}
 
 	uint32_t seq_num;
@@ -196,43 +193,73 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				sendPacket("IPv4", make_packet(sock->context, SYN | ACK));
 
+				sock->context.seq_num++;
 				sock->state = ST_SYN_RCVD;
 			}
 			break;
 
 		case ST_SYN_SENT:	/* 3-way handshake, client. */
 			this->freePacket(packet);
-			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
-				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
+			if((flag & SYN) && (flag & ACK))
 			{
-				if((flag & SYN) && (flag & ACK))
+				auto pcb = sock->getHostPCB();
+
+				assert(pcb->blocked && pcb->syscall == CONNECT);
+
+				if(ack_num != sock->context.seq_num)
 				{
-					if(ack_num != sock->context.seq_num + 1)
-					{
-						// connect fail
-						this->returnSystemCall(pcb.syscallUUID, -1);
-						sock->state = ST_BOUND;
-						break;
-					}
-
-					sock->context.seq_num++;
-					sock->context.ack_num = seq_num + 1;
-
-					sendPacket("IPv4", make_packet(sock->context, ACK));
-
-					assert(pcb.blocked && pcb.syscall == CONNECT);
-
-					sock->state = ST_ESTAB;
-
-					this->returnSystemCall(pcb.syscallUUID, 0);
-					pcb.unblockSyscall();
+					// connect fail
+					this->returnSystemCall(pcb->syscallUUID, -1);
+					sock->state = ST_BOUND;
+					break;
 				}
-				else if(flag & SYN)
-					;//assert(0);  // Simultaneous open not considered
+
+				//sock->context.seq_num++;
+				sock->context.ack_num = seq_num + 1;
+
+				sendPacket("IPv4", make_packet(sock->context, ACK));
+
+				sock->state = ST_ESTAB;
+
+				this->returnSystemCall(pcb->syscallUUID, 0);
+				pcb->unblockSyscall();
+			}
+			else if(flag & SYN)
+			{
+				sock->context.ack_num = seq_num + 1;
+
+				sendPacket("IPv4", make_packet(sock->context, ACK));
+
+				sock->state = ST_SYN_RCVD;
 			}
 			break;
 
 		case ST_SYN_RCVD:	/* 3-way handshake, server. */
+			/* In order to distinguish between simultaneous connection
+			   and the server connection. */
+			if(sock->queue == nullptr)
+			{
+				if(flag & ACK)
+				{
+					auto pcb = sock->getHostPCB();
+
+					assert(pcb->blocked && pcb->syscall == CONNECT);
+
+					if(ack_num != sock->context.seq_num)
+					{
+						// connect fail
+						this->returnSystemCall(pcb->syscallUUID, -1);
+						sock->state = ST_BOUND;
+						break;
+					}
+
+					sock->state = ST_ESTAB;
+
+					this->returnSystemCall(pcb->syscallUUID, 0);
+					pcb->unblockSyscall();
+				}
+				break;
+			}
 			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
 				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
 			{
@@ -240,33 +267,37 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				if(flag & ACK)
 				{
-					if(ack_num != sock->context.seq_num + 1)
+					auto pcb = sock->getHostPCB();
+
+					if(ack_num != sock->context.seq_num)
 					{
 						break;
 					}
 
-					auto sock_accept = new TCPSocket(sock->domain);
+					auto sock_accept = new TCPSocket(pcb, sock->domain);
 					sock_accept->state = ST_ESTAB;
 					sock_accept->context = sock->context;
 
-					sock->queue->accept_map[{ remote_ip, remote_port }] = sock_accept;
+					conn_map[sock_accept->context] = sock_accept;
+					ip_set[local_port][local_ip]++;
 
-					if(pcb.blocked)
+					if(pcb->blocked)
 					{
-						assert(pcb.syscall == ACCEPT);
-						int connfd = this->createFileDescriptor(pid);
+						assert(pcb->syscall == ACCEPT);
+
+						int connfd = this->createFileDescriptor(pcb->getpid());
 
 						if (connfd != -1)
 						{
-							auto &param = pcb.param.acceptParam;
-							pcb.fd_info.insert({ connfd, sock_accept });
+							auto &param = pcb->param.acceptParam;
+							pcb->fd_info.insert({ connfd, sock_accept });
 
 							*param.addr = sock_accept->context.remote_addr;
 							*param.addrlen = sizeof(*param.addr);
 						}
 
-						this->returnSystemCall(pcb.syscallUUID, connfd);
-						pcb.unblockSyscall();
+						this->returnSystemCall(pcb->syscallUUID, connfd);
+						pcb->unblockSyscall();
 					}
 					else
 						sock->queue->accept_queue.push(sock_accept);
@@ -298,70 +329,52 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_ESTAB:		/* Connection established. */
 			this->freePacket(packet);
 
-			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
-				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
+			if (flag & FIN)
 			{
-				if (flag & FIN)
-				{
-					sock->context.seq_num++;
-					sock->context.ack_num = seq_num + 1;
+				//sock->context.seq_num++;
+				sock->context.ack_num = seq_num + 1;
 
-					this->sendPacket("IPv4", make_packet(sock->context, ACK));
+				this->sendPacket("IPv4", make_packet(sock->context, ACK));
 
-					sock->state = ST_CLOSE_WAIT;
-				}
-				else
-					;//assert(0);  '// Read/Write not implemented!'
+				sock->state = ST_CLOSE_WAIT;
 			}
+			else
+				;//assert(0);  '// Read/Write not implemented!'
 			break;
 
 		case ST_FIN_WAIT_1:	/* 4-way handshake, active close. */
 			this->freePacket(packet);
-			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
-				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
+			if (flag & ACK)
 			{
-				if (flag & ACK)
+				if(ack_num != sock->context.seq_num)
 				{
-					if(ack_num != sock->context.seq_num + 1)
-					{
-						break;
-					}
-
-					assert(pcb.blocked && pcb.syscall == CLOSE);
-
-					sock->state = ST_FIN_WAIT_2;
+					break;
 				}
-				else if (flag & FIN)
-				{
-					sock->context.seq_num++;
-					sock->context.ack_num = seq_num + 1;
 
-					this->sendPacket("IPv4", make_packet(sock->context, ACK));
+				sock->state = ST_FIN_WAIT_2;
+			}
+			else if (flag & FIN)
+			{
+				//sock->context.seq_num++;
+				sock->context.ack_num = seq_num + 1;
 
-					sock->state = ST_CLOSING;
-				}
+				this->sendPacket("IPv4", make_packet(sock->context, ACK));
+
+				sock->state = ST_CLOSING;
 			}
 			break;
 		case ST_FIN_WAIT_2:
 			this->freePacket(packet);
-			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
-				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
+			if (flag & FIN)
 			{
-				if (flag & FIN)
-				{
-					assert(pcb.blocked && pcb.syscall == CLOSE);
+				//sock->context.seq_num++;
+				sock->context.ack_num = seq_num + 1;
 
-					sock->context.seq_num++;
-					sock->context.ack_num = seq_num + 1;
+				this->sendPacket("IPv4", make_packet(sock->context, ACK));
 
-					this->sendPacket("IPv4", make_packet(sock->context, ACK));
+				sock->state = ST_TIME_WAIT;
 
-					sock->state = ST_TIME_WAIT;
-
-					this->addTimer((void *)(new std::pair<int, int>(pid, pcb.param.closeParam.fd)), TimeUtil::makeTime(4, TimeUtil::MINUTE));
-					this->returnSystemCall(pcb.syscallUUID, 0);
-					pcb.unblockSyscall();
-				}
+				this->addTimer((void *)sock, TimeUtil::makeTime(4, TimeUtil::MINUTE));
 			}
 			break;
 		case ST_TIME_WAIT:
@@ -371,48 +384,34 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 		case ST_LAST_ACK:
 			this->freePacket(packet);
-			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
-				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
+			if (flag & ACK)
 			{
-				if (flag & ACK)
+				if(ack_num != sock->context.seq_num)
 				{
-					assert(pcb.blocked && pcb.syscall == CLOSE);
-
-					if(ack_num != sock->context.seq_num + 1)
-					{
-						break;
-					}
-
-					fd = pcb.param.closeParam.fd;
-					pcb.fd_info.erase(fd);
-
-					this->removeFileDescriptor(pid, fd);
-					this->returnSystemCall(pcb.syscallUUID, 0);
-					pcb.unblockSyscall();
+					break;
 				}
+
+				conn_map.erase(sock->context);
+				ip_set[local_port][local_ip]--;
+				if (!ip_set[local_port][local_ip])
+					ip_set[local_port].erase(local_ip);
+
+				delete sock;
 			}
 			break;
 
 		case ST_CLOSING:	/* Recieved FIN after sending FIN. */
 			this->freePacket(packet);
-			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
-				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
+			if (flag & ACK)
 			{
-				if (flag & ACK)
+				if(ack_num != sock->context.seq_num)
 				{
-					assert(pcb.blocked && pcb.syscall == CLOSE);
-
-					if(ack_num != sock->context.seq_num + 1)
-					{
-						break;
-					}
-
-					sock->state = ST_TIME_WAIT;
-
-					this->addTimer((void *)(new std::pair<int, int>(pid, pcb.param.closeParam.fd)), TimeUtil::makeTime(4, TimeUtil::MINUTE));
-					this->returnSystemCall(pcb.syscallUUID, 0);
-					pcb.unblockSyscall();
+					break;
 				}
+
+				sock->state = ST_TIME_WAIT;
+
+				this->addTimer((void *)sock, TimeUtil::makeTime(4, TimeUtil::MINUTE));
 			}
 			break;
 
@@ -423,21 +422,20 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 void TCPAssignment::timerCallback(void* payload)
 {
-	auto pid_fd = (std::pair<int, int> *) payload;
-	int pid;
-	int fd;
-	std::tie(pid, fd) = *pid_fd;
-	delete pid_fd;
-
-	auto &pcb = proc_table[pid];
-	auto sock = pcb.fd_info[fd];
+	auto sock = (TCPSocket *)payload;
 
 	assert(sock->state == ST_TIME_WAIT);
 
-	pcb.fd_info.erase(fd);
-	delete sock;
+	in_addr_t local_ip;
+	in_port_t local_port;
+	std::tie(local_ip, local_port) = untie_addr(sock->context.local_addr);
 
-	this->removeFileDescriptor(pid, fd);
+	conn_map.erase(sock->context);
+	ip_set[local_port][local_ip]--;
+	if (!ip_set[local_port][local_ip])
+		ip_set[local_port].erase(local_ip);
+	
+	delete sock;
 }
 
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
@@ -453,7 +451,8 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 
 	if(fd != -1)
 	{
-		proc_table[pid].fd_info.insert({ fd, new TCPSocket(domain) });
+		auto pcb = getPCBEntry(pid);
+		pcb->fd_info.insert({ fd, new TCPSocket(pcb, domain) });
 	}
 
 	this->returnSystemCall(syscallUUID, fd);
@@ -463,8 +462,8 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	int fd)
 {
-	auto &pcb = proc_table[pid];
-	auto &fd_info = pcb.fd_info;
+	auto pcb = getPCBEntry(pid);
+	auto &fd_info = pcb->fd_info;
 
 	auto sock_it = fd_info.find(fd);
 	if(sock_it == fd_info.end())
@@ -474,58 +473,53 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	}
 	auto sock = sock_it->second;
 
-	if(sock->state == ST_ESTAB || sock->state == ST_SYN_RCVD)
+	if(sock->state == ST_ESTAB)
 	{
-		sock->context.seq_num++;
 		sock->context.ack_num = 0;
 
 		this->sendPacket("IPv4", make_packet(sock->context, FIN));
 
+		sock->context.seq_num++;
 		sock->state = ST_FIN_WAIT_1;
 	}
 	else if(sock->state == ST_CLOSE_WAIT)
 	{
-		sock->context.seq_num++;
 		sock->context.ack_num = 0;
 
 		this->sendPacket("IPv4", make_packet(sock->context, FIN));
 
+		sock->context.seq_num++;
 		sock->state = ST_LAST_ACK;
 	}
-	else if(sock->state == ST_TIME_WAIT)
-	{
-		this->returnSystemCall(syscallUUID, -1);
-		return;
-	}
-	else
-	{
-		if(sock->state == ST_BOUND || sock->state == ST_LISTEN)
-		{
-			in_addr_t ip;
-			in_port_t port;
-			std::tie(ip, port) = untie_addr(sock->context.local_addr);
 
-			ip_set[port].erase(ip);
-			if (ip_set[port].empty())
-				ip_set.erase(port);
+	if(sock->state == ST_BOUND || sock->state == ST_LISTEN || sock->state == ST_SYN_RCVD)
+	{
+		in_addr_t ip;
+		in_port_t port;
+		std::tie(ip, port) = untie_addr(sock->context.local_addr);
+
+		if (sock->state == ST_LISTEN || sock->state == ST_SYN_RCVD)
+		{
+			listen_map.erase(untie_addr(sock->queue->listen_addr));
 		}
 
-		fd_info.erase(sock_it);
+		ip_set[port][ip]--;
+		if (!ip_set[port][ip])
+			ip_set[port].erase(ip);
 
-		this->removeFileDescriptor(pid, fd);
-		this->returnSystemCall(syscallUUID, 0);
-		return;
+		delete sock;
 	}
 
-	PCBEntry::syscallParam param;
-	param.closeParam = { fd };
-	pcb.blockSyscall(CLOSE, syscallUUID, param);
+	fd_info.erase(sock_it);
+
+	this->removeFileDescriptor(pid, fd);
+	this->returnSystemCall(syscallUUID, 0);
 }
 
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	auto &fd_info = proc_table[pid].fd_info;
+	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second->state != ST_READY)
@@ -538,12 +532,11 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	in_addr_t ip;
 	in_port_t port;
 	std::tie(ip, port) = untie_addr(*addr);
-	auto ip_it = ip_set.find(port);
-	if(ip_it != ip_set.end()
-		&& !ip_it->second.empty()
-		&& (ip == INADDR_ANY
-			|| ip_it->second.find(INADDR_ANY) != ip_it->second.end()
-			|| ip_it->second.find(ip) != ip_it->second.end()))
+
+	if(ip_set.find(port) != ip_set.end()
+		&& ((ip == INADDR_ANY && !ip_set[port].empty())
+			|| ip_set[port].find(INADDR_ANY) != ip_set[port].end()
+			|| ip_set[port].find(ip) != ip_set[port].end()))
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
@@ -551,7 +544,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 
 	sock->context.local_addr = tie_addr(ip, port);
 	sock->state = ST_BOUND;
-	ip_set[port][ip] = { pid, sockfd };
+	ip_set[port][ip]++;
 
 	this->returnSystemCall(syscallUUID, 0);
 }
@@ -559,7 +552,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto &fd_info = proc_table[pid].fd_info;
+	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second->state == ST_READY)
@@ -577,8 +570,8 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	PCBEntry &pcb = proc_table[pid];
-	auto &fd_info = pcb.fd_info;
+	auto pcb = getPCBEntry(pid);
+	auto &fd_info = pcb->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end()
@@ -591,11 +584,12 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	auto sock = sock_it->second;
 
 	auto &accept_queue = sock->queue->accept_queue;
+
 	if(accept_queue.empty())
 	{
 		PCBEntry::syscallParam param;
 		param.acceptParam = { sockfd, addr, addrlen };
-		pcb.blockSyscall(ACCEPT, syscallUUID, param);
+		pcb->blockSyscall(ACCEPT, syscallUUID, param);
 		return;
 	}
 
@@ -605,11 +599,6 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 		auto sock_accept = accept_queue.front(); accept_queue.pop();
 
 		fd_info.insert({ connfd, sock_accept });
-
-		in_addr_t remote_ip;
-		in_port_t remote_port;
-		std::tie(remote_ip, remote_port) = untie_addr(sock_accept->context.remote_addr);
-		sock->queue->accept_map[{ remote_ip, remote_port }] = sock_accept;
 
 		*addr = sock_accept->context.remote_addr;
 		*addrlen = sizeof(*addr);
@@ -621,8 +610,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-	auto &pcb = proc_table[pid];
-	auto &fd_info = pcb.fd_info;
+	auto pcb = getPCBEntry(pid);
+	auto &fd_info = pcb->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second->state == ST_ESTAB)
@@ -654,13 +643,14 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 		{
 			local_port = rand() % 65536;
 			if (ip_set.find(local_port) == ip_set.end()
-				|| (ip_set[local_port].find(INADDR_ANY) != ip_set[local_port].end()
-					&& ip_set[local_port].find(local_ip) != ip_set[local_port].end()))
+				|| (ip_set[local_port].find(INADDR_ANY) == ip_set[local_port].end()
+					&& ip_set[local_port].find(local_ip) == ip_set[local_port].end()))
 				break;
 		}
 		sock->context.local_addr = tie_addr(local_ip, local_port);
 		sock->state = ST_BOUND;
-		ip_set[local_port][local_ip] = { pid, sockfd };
+
+		ip_set[local_port][local_ip]++;
 	}
 	else
 		std::tie(local_ip, local_port) = untie_addr(sock->context.local_addr);
@@ -670,17 +660,20 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 
 	this->sendPacket("IPv4", make_packet(sock->context, SYN));
 
+	sock->context.seq_num++;
 	sock->state = ST_SYN_SENT;
+
+	conn_map[sock->context] = sock;
 
 	PCBEntry::syscallParam param;
 	param.connectParam = { sockfd, addr, addrlen };
-	pcb.blockSyscall(CONNECT, syscallUUID, param);
+	pcb->blockSyscall(CONNECT, syscallUUID, param);
 }
 
 void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-	auto &fd_info = proc_table[pid].fd_info;
+	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second->state != ST_ESTAB)
@@ -698,7 +691,7 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	int sockfd, int backlog)
 {
-	auto &fd_info = proc_table[pid].fd_info;
+	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
 	if(sock_it == fd_info.end() || sock_it->second->state != ST_BOUND)
@@ -709,7 +702,9 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	auto &sock = sock_it->second;
 
 	sock->state = ST_LISTEN;
-	sock->queue = new PassiveQueue(backlog);
+	sock->queue = new ListenQueue(sock->context.local_addr, backlog);
+	listen_map[untie_addr(sock->context.local_addr)] = sock;
+
 	this->returnSystemCall(syscallUUID, 0);
 }
 
@@ -758,6 +753,13 @@ Packet *TCPAssignment::make_packet(TCPContext &context, uint8_t flag)
 	return packet;
 }
 
+TCPAssignment::PCBEntry *TCPAssignment::getPCBEntry(int pid)
+{
+	if (proc_table.find(pid) == proc_table.end())
+		proc_table[pid] = new PCBEntry(pid);
+	return proc_table[pid];
+}
+
 
 TCPAssignment::TCPContext::TCPContext() : seq_num(), ack_num()
 {
@@ -774,31 +776,35 @@ TCPAssignment::TCPContext::~TCPContext()
 }
 
 
-TCPAssignment::PassiveQueue::PassiveQueue(int backlog) : listen_queue(), accept_queue(), temp_buffer(), accept_map()
+TCPAssignment::ListenQueue::ListenQueue(sockaddr listen_addr, int backlog) : listen_queue(), accept_queue(), backlog(backlog)
 {
-	this->backlog = backlog;
-	this->temp_buffer.clear();
+	this->listen_addr = listen_addr;
 }
-TCPAssignment::PassiveQueue::~PassiveQueue()
+TCPAssignment::ListenQueue::~ListenQueue()
 {
 
 }
 
 
-TCPAssignment::TCPSocket::TCPSocket(int domain) : context()
+TCPAssignment::TCPSocket::TCPSocket(PCBEntry *pcb, int domain) : context()
 {
+	this->pcb = pcb;
 	this->domain = domain;
 	this->state = ST_READY;
 	this->queue = nullptr;
-	this->blocked = false;
 }
 TCPAssignment::TCPSocket::~TCPSocket()
 {
 	delete queue;
 }
-
-TCPAssignment::PCBEntry::PCBEntry()
+TCPAssignment::PCBEntry *TCPAssignment::TCPSocket::getHostPCB()
 {
+	return this->pcb;
+}
+
+TCPAssignment::PCBEntry::PCBEntry(int pid)
+{
+	this->pid = pid;
 	this->fd_info.clear();
 	this->blocked = false;
 }
@@ -829,6 +835,10 @@ void TCPAssignment::PCBEntry::blockSyscall(enum SystemCall syscall, UUID syscall
 void TCPAssignment::PCBEntry::unblockSyscall()
 {
 	this->blocked = false;
+}
+int TCPAssignment::PCBEntry::getpid()
+{
+	return this->pid;
 }
 
 
