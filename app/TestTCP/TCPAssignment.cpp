@@ -55,6 +55,7 @@ void TCPAssignment::finalize()
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param)
 {
+	//fprintf(stderr, "System call %d, %lu at pid %d\n", param.syscallNumber,syscallUUID, pid);
 	switch(param.syscallNumber)
 	{
 	case SOCKET:
@@ -214,7 +215,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 						break;
 					}
 
-					sock->context.seq_num = 0;
+					sock->context.seq_num++;
 					sock->context.ack_num = seq_num + 1;
 
 					sendPacket("IPv4", make_packet(sock->context, ACK));
@@ -297,13 +298,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_ESTAB:		/* Connection established. */
 			this->freePacket(packet);
 
-
 			if( untie_addr(sock->context.local_addr) == std::make_pair(local_ip, local_port) &&
 				untie_addr(sock->context.remote_addr) == std::make_pair(remote_ip, remote_port))
 			{
 				if (flag & FIN)
 				{
-					sock->context.seq_num = 0;
+					sock->context.seq_num++;
 					sock->context.ack_num = seq_num + 1;
 
 					this->sendPacket("IPv4", make_packet(sock->context, ACK));
@@ -333,7 +333,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				}
 				else if (flag & FIN)
 				{
-					sock->context.seq_num = 0;
+					sock->context.seq_num++;
 					sock->context.ack_num = seq_num + 1;
 
 					this->sendPacket("IPv4", make_packet(sock->context, ACK));
@@ -351,7 +351,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				{
 					assert(pcb.blocked && pcb.syscall == CLOSE);
 
-					sock->context.seq_num = 0;
+					sock->context.seq_num++;
 					sock->context.ack_num = seq_num + 1;
 
 					this->sendPacket("IPv4", make_packet(sock->context, ACK));
@@ -476,7 +476,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 
 	if(sock->state == ST_ESTAB || sock->state == ST_SYN_RCVD)
 	{
-		sock->context.seq_num = rand_seq_num();
+		sock->context.seq_num++;
 		sock->context.ack_num = 0;
 
 		this->sendPacket("IPv4", make_packet(sock->context, FIN));
@@ -485,7 +485,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	}
 	else if(sock->state == ST_CLOSE_WAIT)
 	{
-		sock->context.seq_num = rand_seq_num();
+		sock->context.seq_num++;
 		sock->context.ack_num = 0;
 
 		this->sendPacket("IPv4", make_packet(sock->context, FIN));
@@ -834,8 +834,7 @@ void TCPAssignment::PCBEntry::unblockSyscall()
 
 uint32_t TCPAssignment::rand_seq_num()
 {
-	static uint32_t cnt = 0;
-	return cnt++;
+	return rand();
 }
 
 std::pair<in_addr_t, in_port_t> TCPAssignment::untie_addr(sockaddr addr)
