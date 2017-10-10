@@ -68,14 +68,17 @@ private:
 		uint32_t ack_num;
 
 		TCPContext();
+		TCPContext(sockaddr local_addr, sockaddr remote_addr);
 		~TCPContext();
 	};
+
+	class TCPSocket;
 
 	class PassiveQueue
 	{
 	public:
 		std::queue<Packet *> listen_queue;
-		std::queue<TCPContext> accept_queue;
+		std::queue<TCPSocket *> accept_queue;
 		int backlog;
 
 		struct AddrHash
@@ -93,7 +96,8 @@ private:
 				return h1 ^ (h2 << 1);
 			}
 		};
-		std::unordered_map<TCPContext, std::queue<Packet *>, AddrHash> temp_buffer;
+		std::unordered_map<std::pair<in_addr_t, in_port_t>, std::queue<Packet *>> temp_buffer;
+		std::unordered_map<std::pair<in_addr_t, in_port_t>, TCPSocket *> accept_map;
 
 		PassiveQueue(int backlog);
 		~PassiveQueue();
@@ -118,7 +122,7 @@ private:
 	class PCBEntry
 	{
 	public:
-		std::unordered_map<int, TCPSocket> fd_info;
+		std::unordered_map<int, TCPSocket *> fd_info;
 
 		bool blocked;
 		enum SystemCall syscall;
