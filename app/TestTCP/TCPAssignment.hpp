@@ -43,20 +43,21 @@ private:
 
 	enum TCPState
 	{
-		ST_READY, 		/* Socket is ready. */
-		ST_BOUND,		/* Socket is bound. */
-		ST_LISTEN,		/* Connect ready. Only for server. */
-		ST_SYN_SENT,	/* 3-way handshake, client. */
-		ST_SYN_RCVD,	/* 3-way handshake, server. */
-		ST_ESTAB,		/* Connection established. */
+		ST_READY, 			/* Socket is ready. */
+		ST_BOUND,			/* Socket is bound. */
+		ST_LISTEN,			/* Connect ready. Only for server. */
+		ST_SYN_SENT,		/* 3-way handshake, client. */
+		ST_SYN_RCVD,		/* 3-way handshake, server. */
+		ST_SYN_RCVD_SIM,	/* Simultaneous connect. */
+		ST_ESTAB,			/* Connection established. */
 
-		ST_FIN_WAIT_1,	/* 4-way handshake, active close. */
+		ST_FIN_WAIT_1,		/* 4-way handshake, active close. */
 		ST_FIN_WAIT_2,
 		ST_TIME_WAIT,
-		ST_CLOSE_WAIT,	/* 4-way handshake, passive close. */
+		ST_CLOSE_WAIT,		/* 4-way handshake, passive close. */
 		ST_LAST_ACK,
 
-		ST_CLOSING		/* Recieved FIN after sending FIN. */
+		ST_CLOSING			/* Recieved FIN after sending FIN. */
 	};
 
 	class TCPContext
@@ -69,8 +70,8 @@ private:
 
 		bool operator==(const TCPContext &context) const
 		{
-			return untie_addr(local_addr) == untie_addr(context.local_addr)
-			&& untie_addr(remote_addr) == untie_addr(context.remote_addr);
+			return unpack_addr(local_addr) == unpack_addr(context.local_addr)
+			&& unpack_addr(remote_addr) == unpack_addr(context.remote_addr);
 		}
 
 		TCPContext();
@@ -78,20 +79,33 @@ private:
 		~TCPContext();
 	};
 
+	static std::pair<in_addr_t, in_port_t> unpack_addr(sockaddr addr);
+	static sockaddr pack_addr(in_addr_t ip, in_port_t port);
+
+	struct ContextHash
+	{
+		std::size_t operator()(const TCPContext &context) const
+		{
+			std::size_t h1 = std::hash<std::pair<in_addr_t, in_port_t>>{}(unpack_addr(context.local_addr));
+			std::size_t h2 = std::hash<std::pair<in_addr_t, in_port_t>>{}(unpack_addr(context.remote_addr));
+			return h1 ^ (h2 << 1);
+		}
+	};
+
 	class PCBEntry;
 	class TCPSocket;
 
-	class ListenQueue
+	class ListenModule
 	{
 	public:
 		sockaddr listen_addr;
 
-		std::queue<Packet *> listen_queue;
+		std::unordered_map<TCPContext, TCPSocket *, ContextHash> pending_map;
 		std::queue<TCPSocket *> accept_queue;
 		int backlog;
 
-		ListenQueue(sockaddr listen_addr, int backlog);
-		~ListenQueue();
+		ListenModule(sockaddr listen_addr, int backlog);
+		~ListenModule();
 	};
 
 	class TCPSocket
@@ -102,12 +116,14 @@ private:
 		int domain;		/* This is always AF_INET in KENSv3. */
 		enum TCPState state;
 		TCPContext context;
+		uint32_t seq_num;
+		uint32_t ack_num;
 
-		std::queue<Packet *> temp_buffer;
+		//std::queue<Packet *> temp_buffer;
 
-		ListenQueue *queue;	/* Only used for LISTENing. */
+		ListenModule *listen;	/* Only used for LISTENing. */
 
-		TCPSocket(PCBEntry *pcb, int domain = AF_INET);
+		TCPSocket(PCBEntry *pcb, int domain);
 		~TCPSocket();
 		PCBEntry *getHostPCB();
 	};
@@ -149,26 +165,17 @@ private:
 		int getpid();
 	};
 
-	struct ContextHash
-	{
-		std::size_t operator()(const TCPContext &context) const
-		{
-			std::size_t h1 = std::hash<std::pair<in_addr_t, in_port_t>>{}(untie_addr(context.local_addr));
-			std::size_t h2 = std::hash<std::pair<in_addr_t, in_port_t>>{}(untie_addr(context.remote_addr));
-			return h1 ^ (h2 << 1);
-		}
-	};
 	std::unordered_map<TCPContext, TCPSocket *, ContextHash> conn_map;
 	std::unordered_map<std::pair<in_addr_t, in_port_t>, TCPSocket *> listen_map;
 	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, size_t>> ip_set;
 	std::unordered_map<int, PCBEntry *> proc_table;
 
+	void add_addr(in_addr_t ip, in_port_t port);
+	void remove_addr(in_addr_t ip, in_port_t port);
+
 	uint32_t rand_seq_num();
 
-	static std::pair<in_addr_t, in_port_t> untie_addr(sockaddr addr);
-	static sockaddr tie_addr(in_addr_t ip, in_port_t port);
-
-	Packet *make_packet(TCPContext &context, uint8_t flag);
+	Packet *make_packet(TCPSocket *sock, uint8_t flag);
 
 	PCBEntry *getPCBEntry(int pid);
 
