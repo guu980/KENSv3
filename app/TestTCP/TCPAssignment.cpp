@@ -500,7 +500,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 					conn_sock->seq_num++;
 					conn_sock->state = ST_FIN_WAIT_1;
 				}
-				
+
 				while(!sock->listen->accept_queue.empty())
 				{
 					auto conn_sock = sock->listen->accept_queue.front();
