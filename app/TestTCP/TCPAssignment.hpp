@@ -2,7 +2,7 @@
  * E_TCPAssignment.hpp
  *
  *  Created on: 2014. 11. 20.
- *      Author: Keunhong Lee
+ *      Author: Keunhong Lee, Minkyu Jo, Joonhyung Shin
  */
 
 #ifndef E_TCPASSIGNMENT_HPP_
