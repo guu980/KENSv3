@@ -496,7 +496,14 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 			if(sock->state == ST_LISTEN)
 			{
 				for(auto conn_sock_it : sock->listen->pending_map)
-					this->sendPacket("IPv4", make_packet(conn_sock_it.second, FIN));
+				{
+					auto conn_sock = conn_sock_it.second;
+
+					this->sendPacket("IPv4", make_packet(conn_sock, FIN));
+
+					conn_sock->seq_num++;
+					conn_sock->state = ST_FIN_WAIT_1;
+				}
 				
 				while(!sock->listen->accept_queue.empty())
 				{
@@ -504,6 +511,9 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 					sock->listen->accept_queue.pop();
 
 					this->sendPacket("IPv4", make_packet(conn_sock, FIN));
+
+					conn_sock->seq_num++;
+					conn_sock->state = ST_FIN_WAIT_1;
 				}
 
 				listen_map.erase(unpack_addr(sock->listen->listen_addr));
@@ -742,8 +752,6 @@ Packet *TCPAssignment::make_packet(TCPSocket *sock, uint8_t flag)
 	packet->writeData(tcp_start + 12, &new_data_ofs_ns, 1);
 	packet->writeData(tcp_start + 14, &window_size, 2);
 	packet->writeData(tcp_start + 13, &flag, 1);
-
-	
 
 	uint32_t new_seq_num = htonl(sock->seq_num);
 	packet->writeData(tcp_start + 4, &new_seq_num, 4);
