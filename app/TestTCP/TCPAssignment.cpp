@@ -135,7 +135,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	TCPContext context(local_addr, remote_addr);
 
 	auto sock_it = conn_map.find(context);
-	if (sock_it != conn_map.end())
+	if(sock_it != conn_map.end())
 	{
 		sock = sock_it->second;
 	}
@@ -605,7 +605,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	}
 
 	int connfd = this->createFileDescriptor(pid);
-	if (connfd != -1)
+	if(connfd != -1)
 	{
 		auto sock_accept = accept_queue.front(); accept_queue.pop();
 
@@ -643,17 +643,17 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	if(sock->state == ST_READY)
 	{
 		int table_port = this->getHost()->getRoutingTable((uint8_t *)&remote_ip);
-		if (!this->getHost()->getIPAddr((uint8_t *)&local_ip, table_port))
+		if(!this->getHost()->getIPAddr((uint8_t *)&local_ip, table_port))
 		{
 			this->returnSystemCall(syscallUUID, -1);
 			return;
 		}
 		local_ip = be32toh(local_ip);
 
-		while (true)
+		while(true)
 		{
 			local_port = rand() % 65536;
-			if (ip_set.find(local_port) == ip_set.end()
+			if(ip_set.find(local_port) == ip_set.end()
 				|| (ip_set[local_port].find(INADDR_ANY) == ip_set[local_port].end()
 					&& ip_set[local_port].find(local_ip) == ip_set[local_port].end()))
 				break;
@@ -767,7 +767,7 @@ Packet *TCPAssignment::make_packet(TCPSocket *sock, uint8_t flag)
 
 TCPAssignment::PCBEntry *TCPAssignment::getPCBEntry(int pid)
 {
-	if (proc_table.find(pid) == proc_table.end())
+	if(proc_table.find(pid) == proc_table.end())
 		proc_table[pid] = new PCBEntry(pid);
 	return proc_table[pid];
 }
@@ -793,10 +793,10 @@ void TCPAssignment::add_addr(in_addr_t ip, in_port_t port)
 void TCPAssignment::remove_addr(in_addr_t ip, in_port_t port)
 {
 	ip_set[port][ip]--;
-	if (!ip_set[port][ip])
+	if(!ip_set[port][ip])
 	{
 		ip_set[port].erase(ip);
-		if (ip_set[port].empty())
+		if(ip_set[port].empty())
 			ip_set.erase(port);
 	}
 }
