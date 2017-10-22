@@ -15,14 +15,6 @@
 #include <E/E_TimeUtil.hpp>
 #include "TCPAssignment.hpp"
 
-#include <tuple>
-#include <iostream>
-#include <cstdio>
-#include <cstdlib>
-#include <ctime>
-
-#define VOID_RETURN 0
-
 namespace E
 {
 
@@ -30,24 +22,28 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 		NetworkModule(this->getHostModuleName(), host->getNetworkSystem()),
 		SystemCallInterface(AF_INET, IPPROTO_TCP, host),
 		NetworkLog(host->getNetworkSystem()),
-		TimerModule(host->getSystem())
+		TimerModule(host->getSystem()),
+		sock_set(), conn_map(), listen_map(), ip_set(), proc_table()
 {
-	/* Perhaps we can believe STL? */
-	conn_map.clear();
-	listen_map.clear();
-	proc_table.clear();
-	ip_set.clear();
-	srand(time(NULL));
+
 }
 
 TCPAssignment::~TCPAssignment()
 {
+	for(auto sock : sock_set)
+	{
+		delete sock;
+	}
 
+	for(auto pid_pcb : proc_table)
+	{
+		delete pid_pcb.second;
+	}
 }
 
 void TCPAssignment::initialize()
 {
-
+	srand(time(NULL));
 }
 
 void TCPAssignment::finalize()
@@ -186,7 +182,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 			if((int)sock->listen->pending_map.size() < sock->listen->backlog && (flag & SYN))
 			{
-				auto conn_sock = new TCPSocket(sock->getHostPCB(), sock->domain);
+				auto conn_sock = createSocket(sock->getHostPCB(), sock->domain);
 				conn_sock->state = ST_SYN_RCVD;
 				conn_sock->context = context;
 				conn_sock->seq_num = rand_seq_num();
@@ -271,7 +267,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					conn_map.erase(context);
 					remove_addr(local_ip, local_port);
 
-					delete sock;
+					destroySocket(sock);
 
 					break;
 				}
@@ -395,7 +391,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				conn_map.erase(sock->context);
 				remove_addr(local_ip, local_port);
 
-				delete sock;
+				destroySocket(sock);
 			}
 			break;
 
@@ -428,8 +424,8 @@ void TCPAssignment::timerCallback(void* payload)
 
 	conn_map.erase(sock->context);
 	remove_addr(local_ip, local_port);
-	
-	delete sock;
+
+	destroySocket(sock);
 }
 
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
@@ -446,7 +442,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 	if(fd != -1)
 	{
 		auto pcb = getPCBEntry(pid);
-		pcb->fd_info.insert({ fd, new TCPSocket(pcb, domain) });
+		pcb->fd_info.insert({ fd, createSocket(pcb, domain) });
 	}
 
 	this->returnSystemCall(syscallUUID, fd);
@@ -495,9 +491,9 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 
 			if(sock->state == ST_LISTEN)
 			{
-				for(auto conn_sock_it : sock->listen->pending_map)
+				for(auto context_sock : sock->listen->pending_map)
 				{
-					auto conn_sock = conn_sock_it.second;
+					auto conn_sock = context_sock.second;
 
 					this->sendPacket("IPv4", make_packet(conn_sock, FIN));
 
@@ -522,7 +518,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 			remove_addr(ip, port);
 		}
 
-		delete sock;
+		destroySocket(sock);
 	}
 
 	fd_info.erase(sock_it);
@@ -774,6 +770,19 @@ TCPAssignment::PCBEntry *TCPAssignment::getPCBEntry(int pid)
 	if (proc_table.find(pid) == proc_table.end())
 		proc_table[pid] = new PCBEntry(pid);
 	return proc_table[pid];
+}
+
+TCPAssignment::TCPSocket *TCPAssignment::createSocket(PCBEntry *pcb, int domain)
+{
+	auto sock = new TCPSocket(pcb, domain);
+	sock_set.insert(sock);
+	return sock;
+}
+
+void TCPAssignment::destroySocket(TCPSocket *sock)
+{
+	sock_set.erase(sock);
+	delete sock;
 }
 
 void TCPAssignment::add_addr(in_addr_t ip, in_port_t port)

@@ -19,11 +19,6 @@
 
 #include <E/E_TimerModule.hpp>
 
-#include <unordered_set>
-#include <unordered_map>
-#include <queue>
-#include <functional>
-
 namespace E
 {
 
@@ -165,10 +160,14 @@ private:
 		int getpid();
 	};
 
+	std::unordered_set<TCPSocket *> sock_set;
 	std::unordered_map<TCPContext, TCPSocket *, ContextHash> conn_map;
 	std::unordered_map<std::pair<in_addr_t, in_port_t>, TCPSocket *> listen_map;
 	std::unordered_map<in_port_t, std::unordered_map<in_addr_t, size_t>> ip_set;
 	std::unordered_map<int, PCBEntry *> proc_table;
+
+	TCPSocket *createSocket(PCBEntry *pcb, int domain);
+	void destroySocket(TCPSocket *sock);
 
 	void add_addr(in_addr_t ip, in_port_t port);
 	void remove_addr(in_addr_t ip, in_port_t port);
