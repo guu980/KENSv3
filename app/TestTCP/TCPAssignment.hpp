@@ -93,14 +93,36 @@ private:
 	class ListenModule
 	{
 	public:
-		sockaddr listen_addr;
-
 		std::unordered_map<TCPContext, TCPSocket *, ContextHash> pending_map;
 		std::queue<TCPSocket *> accept_queue;
 		int backlog;
 
-		ListenModule(sockaddr listen_addr, int backlog);
+		ListenModule(int backlog);
 		~ListenModule();
+	};
+
+	/*
+	class DataBuffer
+	{
+		size_t size;
+		uint8_t *buffer;
+		off_t ofs;
+
+		DataBuffer(size_t size);
+		~DataBuffer();
+	};
+	*/
+
+	class TransmissionModule
+	{
+	public:
+		uint32_t seq_num;
+		uint32_t ack_num;
+
+		//queue<DataBuffer> data;
+
+		TransmissionModule();
+		~TransmissionModule();
 	};
 
 	class TCPSocket
@@ -111,12 +133,9 @@ private:
 		int domain;		/* This is always AF_INET in KENSv3. */
 		enum TCPState state;
 		TCPContext context;
-		uint32_t seq_num;
-		uint32_t ack_num;
-
-		//std::queue<Packet *> temp_buffer;
 
 		ListenModule *listen;	/* Only used for LISTENing. */
+		TransmissionModule *trans;	/* Only used for peer-peer communication. */
 
 		TCPSocket(PCBEntry *pcb, int domain);
 		~TCPSocket();

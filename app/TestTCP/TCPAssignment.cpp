@@ -112,8 +112,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	const size_t ip_start = 14;  /* Size of Ethernet header */
 
 	uint8_t ihl_buffer;
+	uint16_t tot_buffer;
 	packet->readData(ip_start, &ihl_buffer, 1);
+	packet->readData(ip_start + 2, &tot_buffer, 2);
 	size_t ihl = (ihl_buffer & 0x0f) * 4;  /* Size of the IP header */
+	size_t tot_len = ntohs(tot_buffer);
 
 	size_t tcp_start = ip_start + ihl;
 	uint32_t ip_buffer;
@@ -164,7 +167,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 	uint8_t data_ofs_ns;
 	packet->readData(tcp_start + 12, &data_ofs_ns, 1);
-	//size_t data_ofs = (data_ofs_ns >> 4) * 4;
+	size_t data_ofs = tcp_start + (data_ofs_ns >> 4) * 4;
+	size_t data_len = ip_start + tot_len - data_ofs;
 
 	uint8_t flag;
 	packet->readData(tcp_start + 13, &flag, 1);
@@ -185,8 +189,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				auto conn_sock = createSocket(sock->getHostPCB(), sock->domain);
 				conn_sock->state = ST_SYN_RCVD;
 				conn_sock->context = context;
-				conn_sock->seq_num = rand_seq_num();
-				conn_sock->ack_num = seq_num + 1;
+				conn_sock->trans = new TransmissionModule();
+				conn_sock->trans->seq_num = rand_seq_num();
+				conn_sock->trans->ack_num = seq_num + 1;
 
 				conn_map[context] = conn_sock;
 				sock->listen->pending_map[context] = conn_sock;
@@ -194,7 +199,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				sendPacket("IPv4", make_packet(conn_sock, SYN | ACK));
 
-				conn_sock->seq_num++;
+				conn_sock->trans->seq_num++;
 			}
 			break;
 
@@ -206,7 +211,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				assert(pcb->blocked && pcb->syscall == CONNECT);
 
-				if(ack_num != sock->seq_num)
+				if(ack_num != sock->trans->seq_num)
 				{
 					// connect fail
 					sock->state = ST_BOUND;
@@ -216,7 +221,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					break;
 				}
 
-				sock->ack_num = seq_num + 1;
+				sock->trans->ack_num = seq_num + 1;
 
 				sendPacket("IPv4", make_packet(sock, ACK));
 
@@ -227,7 +232,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			}
 			else if(flag & SYN)
 			{
-				sock->ack_num = seq_num + 1;
+				sock->trans->ack_num = seq_num + 1;
 
 				sendPacket("IPv4", make_packet(sock, ACK));
 
@@ -261,7 +266,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				assert(listen_sock->listen->pending_map.find(context)
 					   != listen_sock->listen->pending_map.end());
 
-				if(ack_num != sock->seq_num)
+				if(ack_num != sock->trans->seq_num)
 				{
 					listen_sock->listen->pending_map.erase(context);
 					conn_map.erase(context);
@@ -306,7 +311,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				assert(pcb->blocked && pcb->syscall == CONNECT);
 
-				if(ack_num != sock->seq_num)
+				if(ack_num != sock->trans->seq_num)
 				{
 					// connect fail
 					this->returnSystemCall(pcb->syscallUUID, -1);
@@ -333,7 +338,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_ESTAB:		/* Connection established. */
 			if(flag & FIN)
 			{
-				sock->ack_num = seq_num + 1;
+				sock->trans->ack_num = seq_num + 1;
 
 				this->sendPacket("IPv4", make_packet(sock, ACK));
 
@@ -346,14 +351,14 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_FIN_WAIT_1:	/* 4-way handshake, active close. */
 			if(flag & ACK)
 			{
-				if(ack_num != sock->seq_num)
+				if(ack_num != sock->trans->seq_num)
 					break;
 
 				sock->state = ST_FIN_WAIT_2;
 			}
 			else if(flag & FIN)
 			{
-				sock->ack_num = seq_num + 1;
+				sock->trans->ack_num = seq_num + 1;
 
 				this->sendPacket("IPv4", make_packet(sock, ACK));
 
@@ -364,7 +369,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_FIN_WAIT_2:
 			if(flag & FIN)
 			{
-				sock->ack_num = seq_num + 1;
+				sock->trans->ack_num = seq_num + 1;
 
 				this->sendPacket("IPv4", make_packet(sock, ACK));
 
@@ -383,7 +388,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_LAST_ACK:
 			if(flag & ACK)
 			{
-				if(ack_num != sock->seq_num)
+				if(ack_num != sock->trans->seq_num)
 				{
 					break;
 				}
@@ -398,7 +403,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_CLOSING:	/* Recieved FIN after sending FIN. */
 			if(flag & ACK)
 			{
-				if(ack_num != sock->seq_num)
+				if(ack_num != sock->trans->seq_num)
 					break;
 
 				sock->state = ST_TIME_WAIT;
@@ -465,20 +470,20 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 
 	if(sock->state == ST_ESTAB)
 	{
-		sock->ack_num = 0;
+		sock->trans->ack_num = 0;
 
 		this->sendPacket("IPv4", make_packet(sock, FIN));
 
-		sock->seq_num++;
+		sock->trans->seq_num++;
 		sock->state = ST_FIN_WAIT_1;
 	}
 	else if(sock->state == ST_CLOSE_WAIT)
 	{
-		sock->ack_num = 0;
+		sock->trans->ack_num = 0;
 
 		this->sendPacket("IPv4", make_packet(sock, FIN));
 
-		sock->seq_num++;
+		sock->trans->seq_num++;
 		sock->state = ST_LAST_ACK;
 	}
 	else
@@ -497,7 +502,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 
 					this->sendPacket("IPv4", make_packet(conn_sock, FIN));
 
-					conn_sock->seq_num++;
+					conn_sock->trans->seq_num++;
 					conn_sock->state = ST_FIN_WAIT_1;
 				}
 
@@ -508,11 +513,11 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 
 					this->sendPacket("IPv4", make_packet(conn_sock, FIN));
 
-					conn_sock->seq_num++;
+					conn_sock->trans->seq_num++;
 					conn_sock->state = ST_FIN_WAIT_1;
 				}
 
-				listen_map.erase(unpack_addr(sock->listen->listen_addr));
+				listen_map.erase(unpack_addr(sock->context.local_addr));
 			}
 
 			remove_addr(ip, port);
@@ -666,12 +671,13 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	else
 		std::tie(local_ip, local_port) = unpack_addr(sock->context.local_addr);
 
-	sock->seq_num = rand_seq_num();
-	sock->ack_num = 0;
+	sock->trans = new TransmissionModule();
+	sock->trans->seq_num = rand_seq_num();
+	sock->trans->ack_num = 0;
 
 	this->sendPacket("IPv4", make_packet(sock, SYN));
 
-	sock->seq_num++;
+	sock->trans->seq_num++;
 	sock->state = ST_SYN_SENT;
 
 	conn_map[sock->context] = sock;
@@ -713,7 +719,7 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	auto &sock = sock_it->second;
 
 	sock->state = ST_LISTEN;
-	sock->listen = new ListenModule(sock->context.local_addr, backlog);
+	sock->listen = new ListenModule(backlog);
 	listen_map[unpack_addr(sock->context.local_addr)] = sock;
 
 	this->returnSystemCall(syscallUUID, 0);
@@ -749,10 +755,10 @@ Packet *TCPAssignment::make_packet(TCPSocket *sock, uint8_t flag)
 	packet->writeData(tcp_start + 14, &window_size, 2);
 	packet->writeData(tcp_start + 13, &flag, 1);
 
-	uint32_t new_seq_num = htonl(sock->seq_num);
+	uint32_t new_seq_num = htonl(sock->trans->seq_num);
 	packet->writeData(tcp_start + 4, &new_seq_num, 4);
 
-	uint32_t new_ack_num = htonl(sock->ack_num);
+	uint32_t new_ack_num = htonl(sock->trans->ack_num);
 	packet->writeData(tcp_start + 8, &new_ack_num, 4);
 
 	uint8_t tcp_header_buffer[20];
@@ -817,15 +823,32 @@ TCPAssignment::TCPContext::~TCPContext()
 }
 
 
-TCPAssignment::ListenModule::ListenModule(sockaddr listen_addr, int backlog) : pending_map(), accept_queue(), backlog(backlog)
+TCPAssignment::ListenModule::ListenModule(int backlog) : pending_map(), accept_queue(), backlog(backlog)
 {
-	this->listen_addr = listen_addr;
+
 }
 TCPAssignment::ListenModule::~ListenModule()
 {
 
 }
 
+TCPAssignment::TransmissionModule::TransmissionModule()
+{
+
+}
+TCPAssignment::TransmissionModule::~TransmissionModule()
+{
+
+}
+
+TCPAssignment::DataBuffer::DataBuffer(size_t size) : buffer(size), ofs()
+{
+
+}
+TCPAssignment::DataBuffer::~DataBuffer()
+{
+
+}
 
 TCPAssignment::TCPSocket::TCPSocket(PCBEntry *pcb, int domain) : context()
 {
@@ -833,10 +856,12 @@ TCPAssignment::TCPSocket::TCPSocket(PCBEntry *pcb, int domain) : context()
 	this->domain = domain;
 	this->state = ST_READY;
 	this->listen = nullptr;
+	this->trans = nullptr;
 }
 TCPAssignment::TCPSocket::~TCPSocket()
 {
 	delete listen;
+	delete trans;
 }
 TCPAssignment::PCBEntry *TCPAssignment::TCPSocket::getHostPCB()
 {
