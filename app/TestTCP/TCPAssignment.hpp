@@ -60,8 +60,6 @@ private:
 	public:
 		sockaddr local_addr;
 		sockaddr remote_addr;
-		uint32_t seq_num;
-		uint32_t ack_num;
 
 		bool operator==(const TCPContext &context) const
 		{
@@ -101,25 +99,23 @@ private:
 		~ListenModule();
 	};
 
-	/*
-	class DataBuffer
-	{
-		size_t size;
-		uint8_t *buffer;
-		off_t ofs;
-
-		DataBuffer(size_t size);
-		~DataBuffer();
-	};
-	*/
-
 	class TransmissionModule
 	{
 	public:
+		/* Sending Module. */
 		uint32_t seq_num;
-		uint32_t ack_num;
 
-		//queue<DataBuffer> data;
+		size_t rwnd;	/* Receiver window size. */
+		size_t cwnd;	/* Congestion window size. */
+		size_t ssthresh;	/* Slow start threshold. */
+
+		uint8_t *snd_buffer;
+
+		/* Receiving Module. */
+		uint32_t ack_num;
+		uint16_t awnd;		/* Advertising window size. */
+
+		uint8_t *rcv_buffer;
 
 		TransmissionModule();
 		~TransmissionModule();
@@ -170,6 +166,18 @@ private:
 				const struct sockaddr *addr;
 				socklen_t addrlen;
 			} connectParam;
+			struct
+			{
+				int fd;
+				void *buf;
+				size_t count;
+			} readParam;
+			struct
+			{
+				int fd;
+				const void *buf;
+				size_t count;
+			} writeParam;
 		} param;
 
 		PCBEntry(int pid);

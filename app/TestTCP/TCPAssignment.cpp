@@ -170,6 +170,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	size_t data_ofs = tcp_start + (data_ofs_ns >> 4) * 4;
 	size_t data_len = ip_start + tot_len - data_ofs;
 
+	uint16_t rwnd;
+	packet->readData(tcp_start + 14, &rwnd, 2);
+	rwnd = ntohs(rwnd);
+
 	uint8_t flag;
 	packet->readData(tcp_start + 13, &flag, 1);
 
@@ -192,6 +196,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				conn_sock->trans = new TransmissionModule();
 				conn_sock->trans->seq_num = rand_seq_num();
 				conn_sock->trans->ack_num = seq_num + 1;
+				conn_sock->trans->awnd = 51200;
 
 				conn_map[context] = conn_sock;
 				sock->listen->pending_map[context] = conn_sock;
@@ -345,7 +350,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				sock->state = ST_CLOSE_WAIT;
 			}
 			else
-				;//assert(0);  '// Read/Write not implemented!'
+				;
+
+
+
+
+
 			break;
 
 		case ST_FIN_WAIT_1:	/* 4-way handshake, active close. */
@@ -674,6 +684,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	sock->trans = new TransmissionModule();
 	sock->trans->seq_num = rand_seq_num();
 	sock->trans->ack_num = 0;
+	sock->trans->awnd = 51200;
 
 	this->sendPacket("IPv4", make_packet(sock, SYN));
 
@@ -725,6 +736,44 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	this->returnSystemCall(syscallUUID, 0);
 }
 
+void TCPAssignment::syscall_read(UUID syscallUUID, int pid,
+	int fd, void *buf, size_t count)
+{
+	auto &fd_info = getPCBEntry(pid)->fd_info;
+
+	auto sock_it = fd_info.find(sockfd);
+	if(sock_it == fd_info.end() || sock_it->second->state != ST_ESTAB)
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &sock = sock_it->second;
+
+	/* ST_ESTAB guarantees that this socket is connect socket. */
+	assert(sock->trans != nullptr);
+
+	this->returnSystemCall(syscallUUID, 0);
+}
+
+void TCPAssignment::syscall_write(UUID syscallUUID, int pid,
+	int fd, const void *buf, size_t count)
+{
+	auto &fd_info = getPCBEntry(pid)->fd_info;
+
+	auto sock_it = fd_info.find(sockfd);
+	if(sock_it == fd_info.end() || sock_it->second->state != ST_ESTAB)
+	{
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+	auto &sock = sock_it->second;
+
+	/* ST_ESTAB guarantees that this socket is connect socket. */
+	assert(sock->trans != nullptr);
+
+	this->returnSystemCall(syscallUUID, 0);
+}
+
 Packet *TCPAssignment::make_packet(TCPSocket *sock, uint8_t flag)
 {
 	TCPContext &context = sock->context;
@@ -750,7 +799,7 @@ Packet *TCPAssignment::make_packet(TCPSocket *sock, uint8_t flag)
 	packet->writeData(tcp_start + 2, &port_buffer, 2);
 
 	uint8_t new_data_ofs_ns = 5 << 4;
-	uint16_t window_size = htons(51200);
+	uint16_t window_size = htons(sock->trans->awnd);
 	packet->writeData(tcp_start + 12, &new_data_ofs_ns, 1);
 	packet->writeData(tcp_start + 14, &window_size, 2);
 	packet->writeData(tcp_start + 13, &flag, 1);
@@ -893,6 +942,12 @@ void TCPAssignment::PCBEntry::blockSyscall(enum SystemCall syscall, UUID syscall
 			break;
 		case CONNECT:
 			this->param.connectParam = param.connectParam;
+			break;
+		case READ:
+			this->param.readParam = param.readParam;
+			break;
+		case WRITE:
+			this->param.writeParam = param.writeParam;
 			break;
 		default:
 			assert(0);
