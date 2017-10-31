@@ -102,23 +102,46 @@ private:
 	class TransmissionModule
 	{
 	public:
-		/* Sending Module. */
-		uint32_t seq_num;
+		const uint32_t SEQ_MAX = UINT32_MAX;
 
+		/*************************/
+		/***  Sending Module.  ***/
+		/*************************/
+		uint32_t seq_num;
 		size_t rwnd;	/* Receiver window size. */
 		size_t cwnd;	/* Congestion window size. */
 		size_t ssthresh;	/* Slow start threshold. */
+		uint8_t *snd_buf;
+		size_t snd_size;
 
-		uint8_t *snd_buffer;
+		/*************************/
+		/*** Receiving Module. ***/
+		/*************************/
 
-		/* Receiving Module. */
+		/*
+		 *    awnd
+		 *  -------------->            <-----------
+		 *  +--------------+----------+-----------+
+		 *  |Pv4 Module ///|  To App  |//// From I|
+		 *  +--------------+----------+-----------+
+		 *                            ^
+		 *                        rcv_base
+		 */
+		const size_t AWND_MAX = UINT16_MAX;
 		uint32_t ack_num;
-		uint16_t awnd;		/* Advertising window size. */
+		uint8_t *rcv_buf;
+		size_t rcv_size;
+		size_t awnd;		/* Advertising window size. */
+		size_t rcv_base;
+		std::unordered_map<uint32_t, uint32_t> unacked;
 
-		uint8_t *rcv_buffer;
-
-		TransmissionModule();
+		TransmissionModule(size_t rcv_size);
 		~TransmissionModule();
+		size_t readData(void *buf, size_t count);
+		bool inSegment(uint32_t seq_begin, uint32_t seq_end, uint32_t seq);
+		bool inRcvdWindow(uint32_t seq);
+		bool isValidSegment(uint32_t seq, size_t count);
+		void recvData(uint32_t seq, const void *buf, size_t count);
 	};
 
 	class TCPSocket
@@ -229,6 +252,11 @@ public:
 		int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 	void syscall_listen(UUID syscallUUID, int pid,
 		int sockfd, int backlog);
+
+	void syscall_read(UUID syscallUUID, int pid,
+		int fd, void *buf, size_t count);
+	void syscall_write(UUID syscallUUID, int pid,
+		int fd, const void *buf, size_t count);
 
 protected:
 	virtual void systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param) final;
