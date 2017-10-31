@@ -63,10 +63,10 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		this->syscall_close(syscallUUID, pid, param.param1_int);
 		break;
 	case READ:
-		//this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
+		this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
 		break;
 	case WRITE:
-		//this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
+		this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
 		break;
 	case CONNECT:
 		this->syscall_connect(syscallUUID, pid, param.param1_int,
@@ -348,11 +348,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 				sock->state = ST_CLOSE_WAIT;
 			}
-			else if(flag & SYN)
-			{
-
-			}
-			else
+			else if(flag & ACK)
 			{
 				if(!sock->trans->isValidSegment(seq_num, data_len))
 					break;
@@ -382,6 +378,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_FIN_WAIT_1:	/* 4-way handshake, active close. */
 			if(flag & ACK)
 			{
+				//fprintf(stderr, "%u %u\n", ack_num, sock->trans->seq_num);
 				if(ack_num != sock->trans->seq_num)
 					break;
 
@@ -503,8 +500,6 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 
 	if(sock->state == ST_ESTAB)
 	{
-		sock->trans->ack_num = 0;
-
 		this->sendPacket("IPv4", make_packet(sock, FIN));
 
 		sock->trans->seq_num++;
@@ -512,8 +507,6 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	}
 	else if(sock->state == ST_CLOSE_WAIT)
 	{
-		sock->trans->ack_num = 0;
-
 		this->sendPacket("IPv4", make_packet(sock, FIN));
 
 		sock->trans->seq_num++;
@@ -706,7 +699,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 
 	sock->trans = new TransmissionModule(51200);
 	sock->trans->seq_num = rand_seq_num();
-	sock->trans->ack_num = 0;
 
 	this->sendPacket("IPv4", make_packet(sock, SYN));
 
@@ -765,12 +757,21 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid,
 	auto &fd_info = pcb->fd_info;
 
 	auto sock_it = fd_info.find(fd);
-	if(sock_it == fd_info.end() || sock_it->second->state != ST_ESTAB)
+	if(sock_it == fd_info.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto &sock = sock_it->second;
+
+	if(sock->state != ST_ESTAB)
+	{
+		if(sock->state == ST_CLOSE_WAIT)
+			this->returnSystemCall(syscallUUID, 0);
+		else
+			this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
 
 	/* ST_ESTAB guarantees that this socket is connect socket. */
 	assert(sock->trans != nullptr);
@@ -784,6 +785,8 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid,
 		return;
 	}
 
+	this->sendPacket("IPv4", make_packet(sock, ACK));
+
 	this->returnSystemCall(syscallUUID, ret);
 }
 
@@ -793,17 +796,26 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid,
 	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(fd);
-	if(sock_it == fd_info.end() || sock_it->second->state != ST_ESTAB)
+	if(sock_it == fd_info.end())
 	{
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto &sock = sock_it->second;
 
+	if(sock->state != ST_ESTAB)
+	{
+		if(sock->state == ST_CLOSE_WAIT)
+			this->returnSystemCall(syscallUUID, 0);
+		else
+			this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
+
 	/* ST_ESTAB guarantees that this socket is connect socket. */
 	assert(sock->trans != nullptr);
 
-	this->returnSystemCall(syscallUUID, 0);
+	this->returnSystemCall(syscallUUID, -1);
 }
 
 Packet *TCPAssignment::make_packet(TCPSocket *sock, uint8_t flag)
@@ -927,7 +939,7 @@ size_t TCPAssignment::TransmissionModule::readData(void *buf, size_t count)
 {
 	size_t app_base = (rcv_base + awnd) % rcv_size;
 
-	if(app_base < rcv_base)
+	if(app_base <= rcv_base)
 	{
 		size_t data_size = rcv_base - app_base;
 		size_t actual_size = std::min(count, data_size);
@@ -971,7 +983,7 @@ bool TCPAssignment::TransmissionModule::isValidSegment(uint32_t seq, size_t coun
 }
 void TCPAssignment::TransmissionModule::recvData(uint32_t seq, const void *buf, size_t count)
 {
-	if(unacked.find(seq) == unacked.end() || inSegment(ack_num - AWND_MAX, ack_num - 1, seq))
+	if(unacked.find(seq) != unacked.end() || inSegment(ack_num - AWND_MAX, ack_num - 1, seq))
 		return;
 
 	size_t seq_diff = seq >= ack_num ? seq - ack_num : SEQ_MAX - ack_num + seq;
