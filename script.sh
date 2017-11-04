@@ -3,7 +3,7 @@
 CNT=1
 make &> /dev/null
 while true; do
-	build/testTCP --gtest_filter="TestEnv_Reliable.TestAccept_*:TestEnv_Any.TestAccept_*:TestEnv_Any.TestConnect_BeforeAccept:TestEnv_Any.TestConnect_AfterAccept:TestEnv_Any.TestClose_*" > result.txt
+	build/testTCP --gtest_filter="TestEnv_Congestion*:TestEnv_Any.TestTransfer_*" > result.txt
 
 	if (( $? != 0 )); then
 		break
