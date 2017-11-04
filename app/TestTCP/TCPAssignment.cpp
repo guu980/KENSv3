@@ -23,7 +23,8 @@ TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
 		SystemCallInterface(AF_INET, IPPROTO_TCP, host),
 		NetworkLog(host->getNetworkSystem()),
 		TimerModule(host->getSystem()),
-		sock_set(), conn_map(), listen_map(), ip_set(), proc_table()
+		sock_set(), timer_map(), packet_set(),
+		conn_map(), listen_map(), ip_set(), proc_table()
 {
 
 }
@@ -33,6 +34,16 @@ TCPAssignment::~TCPAssignment()
 	for(auto sock : sock_set)
 	{
 		delete sock;
+	}
+
+	for(auto packet : packet_set)
+	{
+		this->freePacket(packet);
+	}
+
+	for(auto payload : timer_map)
+	{
+		delete payload.second;
 	}
 
 	for(auto pid_pcb : proc_table)
@@ -53,7 +64,6 @@ void TCPAssignment::finalize()
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallParameter& param)
 {
-	//fprintf(stderr, "System call %d, %lu at pid %d\n", param.syscallNumber,syscallUUID, pid);
 	switch(param.syscallNumber)
 	{
 	case SOCKET:
@@ -109,184 +119,62 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	 * (3) Handle the packet according to the state of the socket.
 	 */
 
-	const size_t ip_start = 14;  /* Size of Ethernet header */
+	PacketReader reader(packet);
+	TCPContext context;
+	reader.recvAddress(context);
+	//	fprintf(stderr, "Packet Hello: %u %hu\n", unpack_addr(context.remote_addr).first, unpack_addr(context.remote_addr).second);
 
-	uint8_t ihl_buffer;
-	uint16_t tot_buffer;
-	packet->readData(ip_start, &ihl_buffer, 1);
-	packet->readData(ip_start + 2, &tot_buffer, 2);
-	size_t ihl = (ihl_buffer & 0x0f) * 4;  /* Size of the IP header */
-	size_t tot_len = ntohs(tot_buffer);
-
-	size_t tcp_start = ip_start + ihl;
-	uint32_t ip_buffer;
-	uint16_t port_buffer;
-
-	packet->readData(ip_start + 12, &ip_buffer, 4);
-	packet->readData(tcp_start + 0, &port_buffer, 2);
-	in_addr_t remote_ip = (in_addr_t)ntohl(ip_buffer);
-	in_port_t remote_port = (in_port_t)ntohs(port_buffer);
-	sockaddr remote_addr = pack_addr(remote_ip, remote_port);
-
-	packet->readData(ip_start + 16, &ip_buffer, 4);
-	packet->readData(tcp_start + 2, &port_buffer, 2);
-	in_addr_t local_ip = (in_addr_t)ntohl(ip_buffer);
-	in_port_t local_port = (in_port_t)ntohs(port_buffer);
-	sockaddr local_addr = pack_addr(local_ip, local_port);
-
-	TCPSocket *sock;
-	TCPContext context(local_addr, remote_addr);
+	in_addr_t ip;
+	in_port_t port;
+	std::tie(ip, port) = unpack_addr(context.local_addr);
 
 	auto sock_it = conn_map.find(context);
 	if(sock_it != conn_map.end())
 	{
-		sock = sock_it->second;
-	}
-	else
-	{
-		auto addr_sock_it = listen_map.find({ INADDR_ANY, local_port });
-		if(addr_sock_it == listen_map.end())
-			addr_sock_it = listen_map.find({ local_ip, local_port });
+		auto sock = sock_it->second;
+		assert(sock && sock->trans);
+		auto trans = sock->trans;
+		uint16_t flag = reader.readFlag();
 
-		if(addr_sock_it == listen_map.end())
+		recvPacket(sock, reader);
+
+		switch(sock->state)
 		{
-			this->freePacket(packet);
-
-			return;
-		}
-
-		sock = addr_sock_it->second;
-	}
-
-	uint32_t seq_num;
-	packet->readData(tcp_start + 4, &seq_num, 4);
-	seq_num = ntohl(seq_num);
-	uint32_t ack_num;
-	packet->readData(tcp_start + 8, &ack_num, 4);
-	ack_num = ntohl(ack_num);
-
-	uint8_t data_ofs_ns;
-	packet->readData(tcp_start + 12, &data_ofs_ns, 1);
-	size_t data_ofs = tcp_start + (data_ofs_ns >> 4) * 4;
-	size_t data_len = ip_start + tot_len - data_ofs;
-
-	uint16_t rwnd;
-	packet->readData(tcp_start + 14, &rwnd, 2);
-	rwnd = ntohs(rwnd);
-
-	uint8_t flag;
-	packet->readData(tcp_start + 13, &flag, 1);
-
-	switch(sock->state)
-	{
-		case ST_READY: 		/* Socket is ready. */
-		case ST_BOUND:		/* Socket is bound. */
-			break;
-
-		case ST_LISTEN:		/* Connect ready. Only for server. */
-			assert(sock->listen != nullptr);
-
-			if((int)sock->listen->pending_map.size() < sock->listen->backlog && (flag & SYN))
+		case ST_SYN_SENT:
+			if(flag & ACK)
 			{
-				auto conn_sock = createSocket(sock->getHostPCB(), sock->domain);
-				conn_sock->state = ST_SYN_RCVD;
-				conn_sock->context = context;
-				conn_sock->trans = new TransmissionModule(51200);
-				conn_sock->trans->seq_num = rand_seq_num();
-				conn_sock->trans->ack_num = seq_num + 1;
-
-				conn_map[context] = conn_sock;
-				sock->listen->pending_map[context] = conn_sock;
-				add_addr(local_ip, local_port);
-
-				sendPacket("IPv4", make_packet(conn_sock, SYN | ACK));
-
-				conn_sock->trans->seq_num++;
-			}
-			break;
-
-		case ST_SYN_SENT:	/* 3-way handshake, client. */
-
-			if((flag & SYN) && (flag & ACK))
-			{
-				auto pcb = sock->getHostPCB();
-
-				assert(pcb->blocked && pcb->syscall == CONNECT);
-
-				if(ack_num != sock->trans->seq_num)
+				if(flag & SYN)
 				{
-					// connect fail
-					sock->state = ST_BOUND;
+					transmitPacket(sock, make_packet(sock, ACK, nullptr, 0), 0);
 
-					this->returnSystemCall(pcb->syscallUUID, -1);
+					sock->state = ST_ESTAB;
+					auto pcb = sock->getHostPCB();
+					assert(pcb->blocked && pcb->syscall == CONNECT);
+
+					this->returnSystemCall(pcb->syscallUUID, 0);
 					pcb->unblockSyscall();
-					break;
 				}
-
-				sock->trans->ack_num = seq_num + 1;
-
-				sendPacket("IPv4", make_packet(sock, ACK));
-
-				sock->state = ST_ESTAB;
-
-				this->returnSystemCall(pcb->syscallUUID, 0);
-				pcb->unblockSyscall();
+				else
+					sock->state = ST_SYN_RCVD_SIM;
 			}
 			else if(flag & SYN)
-			{
-				sock->trans->ack_num = seq_num + 1;
-
-				sendPacket("IPv4", make_packet(sock, ACK));
-
 				sock->state = ST_SYN_RCVD_SIM;
-			}
-			else
-			{
-				auto pcb = sock->getHostPCB();
-
-				assert(pcb->blocked && pcb->syscall == CONNECT);
-
-				sock->state = ST_BOUND;
-
-				this->returnSystemCall(pcb->syscallUUID, -1);
-				pcb->unblockSyscall();
-			}
 			break;
 
-		case ST_SYN_RCVD:	/* 3-way handshake, server. */
+		case ST_SYN_RCVD:
 			if(flag & ACK)
 			{
 				auto pcb = sock->getHostPCB();
+				auto listen_sock = findListenSocket(ip, port);
+				assert(listen_sock && sock->trans);
 
-				auto listen_it = listen_map.find({ INADDR_ANY, local_port });
-				if(listen_it == listen_map.end())
-					listen_it = listen_map.find({ local_ip, local_port });
-
-				assert(listen_it != listen_map.end());
-
-				auto listen_sock = listen_it->second;
-				assert(listen_sock->listen->pending_map.find(context)
-					   != listen_sock->listen->pending_map.end());
-
-				if(ack_num != sock->trans->seq_num)
-				{
-					listen_sock->listen->pending_map.erase(context);
-					conn_map.erase(context);
-					remove_addr(local_ip, local_port);
-
-					destroySocket(sock);
-
-					break;
-				}
+				assert(trans->in_flight.empty());
 
 				sock->state = ST_ESTAB;
-
 				listen_sock->listen->pending_map.erase(context);
 
-				if(pcb->blocked)
+				if(pcb->blocked && pcb->syscall == ACCEPT)
 				{
-					assert(pcb->syscall == ACCEPT);
-
 					int connfd = this->createFileDescriptor(pcb->getpid());
 
 					if(connfd != -1)
@@ -294,9 +182,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 						auto &param = pcb->param.acceptParam;
 						pcb->fd_info.insert({ connfd, sock });
 
-						*param.addr = remote_addr;
+						*param.addr = context.remote_addr;
 						*param.addrlen = sizeof(*param.addr);
 					}
+					else
+						errno = EBADF;
 
 					this->returnSystemCall(pcb->syscallUUID, connfd);
 					pcb->unblockSyscall();
@@ -307,67 +197,62 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			break;
 
 		case ST_SYN_RCVD_SIM:
-			if(flag & ACK)
+			if((flag & ACK) || (flag & SYN))
 			{
-				auto pcb = sock->getHostPCB();
-
-				assert(pcb->blocked && pcb->syscall == CONNECT);
-
-				if(ack_num != sock->trans->seq_num)
-				{
-					// connect fail
-					this->returnSystemCall(pcb->syscallUUID, -1);
-					sock->state = ST_BOUND;
-					break;
-				}
+				if(flag & SYN)
+					transmitPacket(sock, make_packet(sock, ACK, nullptr, 0), 0);
 
 				sock->state = ST_ESTAB;
+				auto pcb = sock->getHostPCB();
+				assert(pcb->blocked && pcb->syscall == CONNECT);
 
 				this->returnSystemCall(pcb->syscallUUID, 0);
 				pcb->unblockSyscall();
 			}
-			else
-			{
-				auto pcb = sock->getHostPCB();
-
-				assert(pcb->blocked && pcb->syscall == CONNECT);
-
-				this->returnSystemCall(pcb->syscallUUID, -1);
-				pcb->unblockSyscall();
-
-				sock->state = ST_BOUND;
-			}
 			break;
+		case ST_ESTAB:
+			if(reader.getSegmentLen() > 0)
+				transmitPacket(sock, make_packet(sock, ACK, nullptr, 0), 0);
 
-		case ST_ESTAB:		/* Connection established. */
-			if(flag & FIN)
+			if(trans->fin_rcvd && trans->fin_seq + 1 == trans->ack_num)
 			{
-				sock->trans->ack_num = seq_num + 1;
-
-				this->sendPacket("IPv4", make_packet(sock, ACK));
+				assert(trans->in_flight.empty());
 
 				sock->state = ST_CLOSE_WAIT;
 			}
-			else if(flag & ACK)
+
+			if(trans->awnd < trans->rcv_size)
 			{
-				if(!sock->trans->isValidSegment(seq_num, data_len))
-					break;
-
-				uint8_t *data_buf = new uint8_t[data_len];
-				packet->readData(data_ofs, data_buf, data_len);
-				sock->trans->recvData(seq_num, data_buf, data_len);
-				delete[] data_buf;
-
-				this->sendPacket("IPv4", make_packet(sock, ACK));
-
 				auto pcb = sock->getHostPCB();
 
 				if(pcb->blocked && pcb->syscall == READ)
 				{
 					auto &param = pcb->param.readParam;
-					size_t ret;
-					if((ret = sock->trans->readData(param.buf, param.count)) > 0)
+					int fd = param.fd;
+					if(pcb->fd_info.find(fd) != pcb->fd_info.end()
+					   && pcb->fd_info[fd] == sock)
 					{
+						int ret = (int)readData(sock, param.buf, param.count);
+						assert(ret > 0);
+						this->returnSystemCall(pcb->syscallUUID, ret);
+						pcb->unblockSyscall();
+					}
+				}
+			}
+
+			if(trans->senderAvailable())
+			{
+				auto pcb = sock->getHostPCB();
+
+				if(pcb->blocked && pcb->syscall == WRITE)
+				{
+					auto &param = pcb->param.writeParam;
+					int fd = param.fd;
+					if(pcb->fd_info.find(fd) != pcb->fd_info.end()
+					   && pcb->fd_info[fd] == sock)
+					{
+						int ret = (int)writeData(sock, param.buf, param.count);
+						assert(ret > 0);
 						this->returnSystemCall(pcb->syscallUUID, ret);
 						pcb->unblockSyscall();
 					}
@@ -375,21 +260,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			}
 			break;
 
-		case ST_FIN_WAIT_1:	/* 4-way handshake, active close. */
+		case ST_FIN_WAIT_1:
 			if(flag & ACK)
-			{
-				//fprintf(stderr, "%u %u\n", ack_num, sock->trans->seq_num);
-				if(ack_num != sock->trans->seq_num)
-					break;
-
 				sock->state = ST_FIN_WAIT_2;
-			}
 			else if(flag & FIN)
 			{
-				sock->trans->ack_num = seq_num + 1;
-
-				this->sendPacket("IPv4", make_packet(sock, ACK));
-
+				transmitPacket(sock, make_packet(sock, ACK, nullptr, 0), 0);
 				sock->state = ST_CLOSING;
 			}
 			break;
@@ -397,51 +273,46 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		case ST_FIN_WAIT_2:
 			if(flag & FIN)
 			{
-				sock->trans->ack_num = seq_num + 1;
-
-				this->sendPacket("IPv4", make_packet(sock, ACK));
-
+				transmitPacket(sock, make_packet(sock, ACK, nullptr, 0), 0);
 				sock->state = ST_TIME_WAIT;
 
-				this->addTimer(sock, TimeUtil::makeTime(4, TimeUtil::MINUTE));
+				auto payload = new TimerPayload(TM_TIME_WAIT);
+				payload->sock = sock;
+				setTimeout(payload, TimeUtil::makeTime(4, TimeUtil::MINUTE));
 			}
 			break;
-
-		case ST_TIME_WAIT:
-		case ST_CLOSE_WAIT:	/* 4-way handshake, passive close. */
-			/* If the peer resends the packet, then we should resend ACK too,
-			   but this is not implemented here. */
-			break;
-
 		case ST_LAST_ACK:
 			if(flag & ACK)
 			{
-				if(ack_num != sock->trans->seq_num)
-				{
-					break;
-				}
-
-				conn_map.erase(sock->context);
-				remove_addr(local_ip, local_port);
-
+				conn_map.erase(context);
+				remove_addr(ip, port);
 				destroySocket(sock);
 			}
 			break;
-
-		case ST_CLOSING:	/* Recieved FIN after sending FIN. */
+		case ST_CLOSING:
 			if(flag & ACK)
 			{
-				if(ack_num != sock->trans->seq_num)
-					break;
-
 				sock->state = ST_TIME_WAIT;
 
-				this->addTimer(sock, TimeUtil::makeTime(4, TimeUtil::MINUTE));
+				auto payload = new TimerPayload(TM_TIME_WAIT);
+				payload->sock = sock;
+				setTimeout(payload, TimeUtil::makeTime(4, TimeUtil::MINUTE));
 			}
 			break;
-
 		default:
-			assert(0);
+			;
+		}
+	}
+	else
+	{
+		TCPSocket *listen_sock;
+		if((listen_sock = findListenSocket(ip, port)) == nullptr)
+		{
+			resetConnection(context, rand_seq_num(), reader.getNextSeqNum());
+			return;
+		}
+
+		listenPacket(listen_sock, reader);
 	}
 
 	this->freePacket(packet);
@@ -449,25 +320,52 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 void TCPAssignment::timerCallback(void* payload)
 {
-	auto sock = (TCPSocket *)payload;
+	auto load = (TimerPayload *)payload;
+	timer_map.erase(load->timerUUID);
 
-	assert(sock->state == ST_TIME_WAIT);
+	switch(load->type)
+	{
+	case TM_RETRANSMIT:
+		retransmit(load);
+		break;
+	case TM_PERSISTENCE:
+		break;
+	case TM_KEEPALIVE:
+		break;
+	case TM_TIME_WAIT:
+	{
+		auto sock = load->sock;
 
-	in_addr_t local_ip;
-	in_port_t local_port;
-	std::tie(local_ip, local_port) = unpack_addr(sock->context.local_addr);
+		assert(sock->state == ST_TIME_WAIT);
 
-	conn_map.erase(sock->context);
-	remove_addr(local_ip, local_port);
+		in_addr_t local_ip;
+		in_port_t local_port;
+		std::tie(local_ip, local_port) = unpack_addr(sock->context.local_addr);
 
-	destroySocket(sock);
+		conn_map.erase(sock->context);
+		remove_addr(local_ip, local_port);
+
+		destroySocket(sock);
+		delete load;
+		break;
+	}
+	default:
+		assert(0);
+	}
 }
 
 void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 		int domain, int protocol)
 {
+	if(domain != AF_INET)
+	{
+		errno = EAFNOSUPPORT;
+		this->returnSystemCall(syscallUUID, -1);
+	}
+
 	if(protocol != IPPROTO_TCP)
 	{
+		errno = EPROTONOSUPPORT;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
@@ -479,6 +377,8 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid,
 		auto pcb = getPCBEntry(pid);
 		pcb->fd_info.insert({ fd, createSocket(pcb, domain) });
 	}
+	else
+		errno = EMFILE;
 
 	this->returnSystemCall(syscallUUID, fd);
 }
@@ -493,62 +393,29 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid,
 	auto sock_it = fd_info.find(fd);
 	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto sock = sock_it->second;
 
-	if(sock->state == ST_ESTAB)
-	{
-		this->sendPacket("IPv4", make_packet(sock, FIN));
-
-		sock->trans->seq_num++;
-		sock->state = ST_FIN_WAIT_1;
-	}
-	else if(sock->state == ST_CLOSE_WAIT)
-	{
-		this->sendPacket("IPv4", make_packet(sock, FIN));
-
-		sock->trans->seq_num++;
-		sock->state = ST_LAST_ACK;
-	}
+	if(sock->state == ST_ESTAB || sock->state == ST_CLOSE_WAIT)
+		closeTransmission(sock);
 	else
 	{
 		if(sock->state == ST_BOUND || sock->state == ST_LISTEN)
 		{
-			in_addr_t ip;
-			in_port_t port;
-			std::tie(ip, port) = unpack_addr(sock->context.local_addr);
-
 			if(sock->state == ST_LISTEN)
 			{
-				for(auto context_sock : sock->listen->pending_map)
-				{
-					auto conn_sock = context_sock.second;
-
-					this->sendPacket("IPv4", make_packet(conn_sock, FIN));
-
-					conn_sock->trans->seq_num++;
-					conn_sock->state = ST_FIN_WAIT_1;
-				}
-
-				while(!sock->listen->accept_queue.empty())
-				{
-					auto conn_sock = sock->listen->accept_queue.front();
-					sock->listen->accept_queue.pop();
-
-					this->sendPacket("IPv4", make_packet(conn_sock, FIN));
-
-					conn_sock->trans->seq_num++;
-					conn_sock->state = ST_FIN_WAIT_1;
-				}
-
+				closeListen(sock);
 				listen_map.erase(unpack_addr(sock->context.local_addr));
 			}
 
+			in_addr_t ip;
+			in_port_t port;
+			std::tie(ip, port) = unpack_addr(sock->context.local_addr);
 			remove_addr(ip, port);
 		}
-
 		destroySocket(sock);
 	}
 
@@ -564,12 +431,18 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if(sock_it == fd_info.end() || sock_it->second->state != ST_READY)
+	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto sock = sock_it->second;
+	if(sock->state != ST_READY)
+	{
+		errno = EINVAL;
+		this->returnSystemCall(syscallUUID, -1);
+	}
 
 	in_addr_t ip;
 	in_port_t port;
@@ -580,6 +453,7 @@ void TCPAssignment::syscall_bind(UUID syscallUUID, int pid,
 			|| ip_set[port].find(INADDR_ANY) != ip_set[port].end()
 			|| ip_set[port].find(ip) != ip_set[port].end()))
 	{
+		errno = EADDRINUSE;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
@@ -597,8 +471,9 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid,
 	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if(sock_it == fd_info.end() || sock_it->second->state == ST_READY)
+	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
@@ -616,14 +491,19 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 	auto &fd_info = pcb->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if(sock_it == fd_info.end()
-		|| (sock_it->second->state != ST_LISTEN
-			&& sock_it->second->state != ST_SYN_RCVD))
+	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto sock = sock_it->second;
+	if(sock->state != ST_LISTEN)
+	{
+		errno = EINVAL;
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
 
 	auto &accept_queue = sock->listen->accept_queue;
 
@@ -645,6 +525,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID, int pid,
 		*addr = sock_accept->context.remote_addr;
 		*addrlen = sizeof(*addr);
 	}
+	else
+		errno = EMFILE;
 
 	this->returnSystemCall(syscallUUID, connfd);
 }
@@ -656,12 +538,22 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 	auto &fd_info = pcb->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if(sock_it == fd_info.end() || sock_it->second->state == ST_ESTAB)
+	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto &sock = sock_it->second;
+	if(sock->state != ST_READY && sock->state != ST_BOUND)
+	{
+		if(sock->state == ST_LISTEN)
+			errno = EOPNOTSUPP;
+		else
+			errno = EISCONN;
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
 
 	in_addr_t remote_ip;
 	in_port_t remote_port;
@@ -676,6 +568,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 		int table_port = this->getHost()->getRoutingTable((uint8_t *)&remote_ip);
 		if(!this->getHost()->getIPAddr((uint8_t *)&local_ip, table_port))
 		{
+			errno = EHOSTUNREACH;
 			this->returnSystemCall(syscallUUID, -1);
 			return;
 		}
@@ -698,11 +591,9 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid,
 		std::tie(local_ip, local_port) = unpack_addr(sock->context.local_addr);
 
 	sock->trans = new TransmissionModule(51200);
-	sock->trans->seq_num = rand_seq_num();
 
-	this->sendPacket("IPv4", make_packet(sock, SYN));
+	transmitPacket(sock, make_packet(sock, SYN, nullptr, 0), 1);
 
-	sock->trans->seq_num++;
 	sock->state = ST_SYN_SENT;
 
 	conn_map[sock->context] = sock;
@@ -718,12 +609,19 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid,
 	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if(sock_it == fd_info.end() || sock_it->second->state != ST_ESTAB)
+	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto &sock = sock_it->second;
+	if(sock->state != ST_ESTAB && sock->state != ST_CLOSE_WAIT)
+	{
+		errno = ENOTCONN;
+		this->returnSystemCall(syscallUUID, -1);
+		return;
+	}
 
 	*addr = sock->context.remote_addr;
 	*addrlen = (socklen_t)sizeof(sock->context.remote_addr);
@@ -736,12 +634,18 @@ void TCPAssignment::syscall_listen(UUID syscallUUID, int pid,
 	auto &fd_info = getPCBEntry(pid)->fd_info;
 
 	auto sock_it = fd_info.find(sockfd);
-	if(sock_it == fd_info.end() || sock_it->second->state != ST_BOUND)
+	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto &sock = sock_it->second;
+	if(sock->state != ST_BOUND)
+	{
+		errno = EADDRINUSE;
+		this->returnSystemCall(syscallUUID, -1);
+	}
 
 	sock->state = ST_LISTEN;
 	sock->listen = new ListenModule(backlog);
@@ -759,25 +663,20 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid,
 	auto sock_it = fd_info.find(fd);
 	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto &sock = sock_it->second;
 
-	if(sock->state != ST_ESTAB)
+	if(count == 0)
 	{
-		if(sock->state == ST_CLOSE_WAIT)
-			this->returnSystemCall(syscallUUID, 0);
-		else
-			this->returnSystemCall(syscallUUID, -1);
+		this->returnSystemCall(syscallUUID, 0);
 		return;
 	}
 
-	/* ST_ESTAB guarantees that this socket is connect socket. */
-	assert(sock->trans != nullptr);
-
 	int ret;
-	if ((ret = (int)sock->trans->readData(buf, count)) == 0)
+	if((ret = (int)readData(sock, buf, count)) == 0)
 	{
 		PCBEntry::syscallParam param;
 		param.readParam = { fd, buf, count };
@@ -785,81 +684,53 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid,
 		return;
 	}
 
-	this->sendPacket("IPv4", make_packet(sock, ACK));
-
 	this->returnSystemCall(syscallUUID, ret);
 }
 
 void TCPAssignment::syscall_write(UUID syscallUUID, int pid,
 	int fd, const void *buf, size_t count)
 {
-	auto &fd_info = getPCBEntry(pid)->fd_info;
+	auto pcb = getPCBEntry(pid);
+	auto &fd_info = pcb->fd_info;
 
 	auto sock_it = fd_info.find(fd);
 	if(sock_it == fd_info.end())
 	{
+		errno = EBADF;
 		this->returnSystemCall(syscallUUID, -1);
 		return;
 	}
 	auto &sock = sock_it->second;
 
-	if(sock->state != ST_ESTAB)
+	if(count == 0)
 	{
-		if(sock->state == ST_CLOSE_WAIT)
-			this->returnSystemCall(syscallUUID, 0);
-		else
-			this->returnSystemCall(syscallUUID, -1);
+		this->returnSystemCall(syscallUUID, 0);
 		return;
 	}
 
-	/* ST_ESTAB guarantees that this socket is connect socket. */
-	assert(sock->trans != nullptr);
+	int ret;
+	if((ret = (int)writeData(sock, buf, count)) == 0)
+	{
+		PCBEntry::syscallParam param;
+		param.writeParam = { fd, buf, count };
+		pcb->blockSyscall(WRITE, syscallUUID, param);
+		return;
+	}
 
-	this->returnSystemCall(syscallUUID, -1);
+	this->returnSystemCall(syscallUUID, ret);
 }
 
-Packet *TCPAssignment::make_packet(TCPSocket *sock, uint8_t flag)
+Packet *TCPAssignment::make_packet(TCPSocket *sock, uint16_t flag, const void *buf, size_t count)
 {
-	TCPContext &context = sock->context;
-	in_addr_t local_ip, remote_ip;
-	in_port_t local_port, remote_port;
-	std::tie(local_ip, local_port) = unpack_addr(context.local_addr);
-	std::tie(remote_ip, remote_port) = unpack_addr(context.remote_addr);
-
-	size_t ip_start = 14;
-	size_t tcp_start = 34;
-	size_t data_ofs = 20;
-
-	Packet *packet = this->allocatePacket(tcp_start + data_ofs);
-
-	uint32_t ip_buffer = htonl(local_ip);
-	packet->writeData(ip_start + 12, &ip_buffer, 4);
-	ip_buffer = htonl(remote_ip);
-	packet->writeData(ip_start + 16, &ip_buffer, 4);
-
-	uint16_t port_buffer = htons(local_port);
-	packet->writeData(tcp_start + 0, &port_buffer, 2);
-	port_buffer = htons(remote_port);
-	packet->writeData(tcp_start + 2, &port_buffer, 2);
-
-	uint8_t new_data_ofs_ns = 5 << 4;
-	uint16_t window_size = htons((uint16_t)sock->trans->awnd);
-	packet->writeData(tcp_start + 12, &new_data_ofs_ns, 1);
-	packet->writeData(tcp_start + 14, &window_size, 2);
-	packet->writeData(tcp_start + 13, &flag, 1);
-
-	uint32_t new_seq_num = htonl(sock->trans->seq_num);
-	packet->writeData(tcp_start + 4, &new_seq_num, 4);
-
-	uint32_t new_ack_num = htonl(sock->trans->ack_num);
-	packet->writeData(tcp_start + 8, &new_ack_num, 4);
-
-	uint8_t tcp_header_buffer[20];
-	packet->readData(tcp_start, tcp_header_buffer, 20);
-	uint16_t checksum = NetworkUtil::tcp_sum(htonl(local_ip), htonl(remote_ip), tcp_header_buffer, 20);
-	checksum = ~checksum;
-	checksum = htons(checksum);
-	packet->writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+	Packet *packet = this->allocatePacket(54 + count);
+	PacketWriter writer(packet, 20, 20, count);
+	writer.sendAddress(sock->context);
+	writer.writeSeqNum(sock->trans->seq_num);
+	writer.writeAckNum(sock->trans->ack_num);
+	writer.writeFlag(flag);
+	writer.writeWindowSize(sock->trans->awnd);
+	writer.writeData(0, buf, count);
+	writer.writeChecksum();
 
 	return packet;
 }
@@ -884,6 +755,21 @@ void TCPAssignment::destroySocket(TCPSocket *sock)
 	delete sock;
 }
 
+UUID TCPAssignment::setTimeout(TimerPayload *payload, Time timeAfter)
+{
+	payload->sent = this->getHost()->getSystem()->getCurrentTime();
+	payload->timeAfter = timeAfter;
+	payload->timerUUID = this->addTimer(payload, timeAfter);
+	timer_map.insert({ payload->timerUUID, payload });
+	return payload->timerUUID;
+}
+
+void TCPAssignment::clearTimeout(UUID timerUUID)
+{
+	this->cancelTimer(timerUUID);
+	timer_map.erase(timerUUID);
+}
+
 void TCPAssignment::add_addr(in_addr_t ip, in_port_t port)
 {
 	ip_set[port][ip]++;
@@ -898,6 +784,231 @@ void TCPAssignment::remove_addr(in_addr_t ip, in_port_t port)
 		if(ip_set[port].empty())
 			ip_set.erase(port);
 	}
+}
+
+TCPAssignment::TCPSocket *TCPAssignment::findListenSocket(in_addr_t ip, in_port_t port)
+{
+	auto listen_it = listen_map.find({ INADDR_ANY, port });
+	if(listen_it == listen_map.end())
+		listen_it = listen_map.find({ ip, port });
+	return listen_it == listen_map.end() ? nullptr : listen_it->second;
+}
+
+size_t TCPAssignment::writeData(TCPSocket *sock, const void *buf, size_t count)
+{
+	assert(sock->trans);
+
+	size_t actual_size = 0;
+	uint8_t *data = (uint8_t *)buf;
+	count = std::min(count, sock->trans->senderAvailable());
+
+	while(count > 0)
+	{
+		size_t write_len = std::min(count, (size_t)512);
+		transmitPacket(sock, make_packet(sock, ACK, data, write_len), write_len);
+
+		count -= write_len;
+		actual_size += write_len;
+		data += write_len;
+	}
+
+	return actual_size;
+}
+
+size_t TCPAssignment::readData(TCPSocket *sock, void *buf, size_t count)
+{
+	assert(sock->trans);
+	return sock->trans->readData(buf, count);
+}
+
+void TCPAssignment::transmitPacket(TCPSocket *sock, Packet *packet, size_t seg_len)
+{
+	assert(sock->trans);
+
+	if((int)seg_len == 0)
+	{
+		/* This indicates pure ACK. */
+		this->sendPacket("IPv4", packet);
+		return;
+	}
+
+	auto trans = sock->trans;
+	auto new_packet = this->clonePacket(packet);
+	packet_set.insert(new_packet);
+
+	this->sendPacket("IPv4", packet);
+
+	auto payload = new TimerPayload(TM_RETRANSMIT);
+	payload->sock = sock;
+	payload->seq = trans->seq_num;
+	payload->packet = new_packet;
+	setTimeout(payload, trans->timeout);
+
+	trans->in_flight.push(payload);
+	trans->seq_num += seg_len;
+}
+
+void TCPAssignment::recvPacket(TCPSocket *sock, PacketReader &reader)
+{
+	assert(sock->trans);
+
+	auto trans = sock->trans;
+	auto &in_flight = trans->in_flight;
+	uint16_t flag = reader.readFlag();
+	uint32_t seq_num = reader.readSeqNum();
+	size_t seg_len = reader.getSegmentLen();
+	size_t data_len = reader.getDataLen();
+
+	if(flag & SYN)
+		trans->ack_num = seq_num + 1;
+	else if(!trans->isValidSegment(seq_num, seg_len))
+		return;
+
+	if((flag & ACK) && !in_flight.empty())
+	{
+		uint32_t ack = reader.readAckNum();
+		if(ack == trans->getLastAcked())
+		{
+			if(seg_len == 0 && trans->rwnd == reader.readWindowSize())
+			{
+				trans->dup_ack_cnt++;
+				if(trans->dup_ack_cnt == 3)
+				{
+					/* Fast retransmit. */
+					auto payload = in_flight.front();
+					clearTimeout(payload->timerUUID);
+					retransmit(payload);
+					for(int i = 0; i < 3; i++)
+						trans->increaseCWND();
+				}
+				else if(trans->dup_ack_cnt > 3)
+					trans->increaseCWND();
+			}
+			trans->rwnd = reader.readWindowSize();
+		}
+		else if(inSegment(trans->getLastAcked() + 1, trans->seq_num, ack))
+		{
+			trans->calcTimeout(this->getHost()->getSystem()->getCurrentTime());
+
+			while(!in_flight.empty()
+			      && inSegment(trans->getLastAcked() + 1, trans->seq_num, ack))
+			{
+				auto payload = in_flight.front();
+				in_flight.pop();
+				clearTimeout(payload->timerUUID);
+				packet_set.erase(payload->packet);
+				this->freePacket(payload->packet);
+				delete payload;
+			}
+
+			trans->increaseCWND();
+			trans->rwnd = reader.readWindowSize();
+			trans->dup_ack_cnt = 0;
+		}
+	}
+
+	if(data_len > 0)
+		trans->recvData(reader);
+
+	if(flag & FIN)
+	{
+		trans->fin_rcvd = true;
+		trans->fin_seq = seq_num + data_len;
+	}
+
+	if(trans->fin_rcvd && trans->ack_num == trans->fin_seq)
+		trans->ack_num++;
+}
+
+void TCPAssignment::listenPacket(TCPSocket *sock, PacketReader &reader)
+{
+	assert(sock->listen);
+
+	uint16_t flag = reader.readFlag();
+	if(flag & SYN)
+	{
+		TCPContext context;
+		reader.recvAddress(context);
+
+		if((int)sock->listen->pending_map.size() < sock->listen->backlog)
+		{
+			auto conn_sock = createSocket(sock->getHostPCB(), sock->domain);
+			conn_sock->context = context;
+
+			conn_sock->trans = new TransmissionModule(51200);
+			conn_map[context] = conn_sock;
+			sock->listen->pending_map[context] = conn_sock;
+
+			in_addr_t local_ip;
+			in_port_t local_port;
+			std::tie(local_ip, local_port) = unpack_addr(conn_sock->context.local_addr);
+			add_addr(local_ip, local_port);
+
+			conn_sock->state = ST_BOUND;
+
+			recvPacket(conn_sock, reader);
+
+			conn_sock->state = ST_SYN_RCVD;
+			transmitPacket(conn_sock, make_packet(conn_sock, SYN | ACK, nullptr, 0), 1);
+		}
+		else
+			resetConnection(context, rand_seq_num(), reader.getNextSeqNum());
+	}
+}
+
+void TCPAssignment::retransmit(TimerPayload *payload)
+{
+	/* TCP Reno: Always set CWND to SSTHRESH. */
+	assert(payload->type == TM_RETRANSMIT);
+
+	this->sendPacket("IPv4", this->clonePacket(payload->packet));
+	setTimeout(payload, std::min(payload->timeAfter * 2, TimeUtil::makeTime(64, TimeUtil::SEC)));
+
+	auto sock = payload->sock;
+	assert(sock->trans);
+	sock->trans->decreaseCWND();
+}
+
+void TCPAssignment::resetConnection(TCPContext &context, uint32_t seq_num, uint32_t ack_num)
+{
+	Packet *packet = this->allocatePacket(54);
+	PacketWriter writer(packet, 20, 20, 0);
+	writer.sendAddress(context);
+	writer.writeSeqNum(seq_num);
+	writer.writeAckNum(ack_num);
+	writer.writeFlag(ACK | RST);
+	writer.writeChecksum();
+
+	this->sendPacket("IPv4", packet);
+}
+
+void TCPAssignment::closeListen(TCPSocket *sock)
+{
+	assert(sock->listen);
+
+	auto listen = sock->listen;
+	for(auto context_sock : listen->pending_map)
+	{
+		closeTransmission(context_sock.second);
+	}
+	while(!listen->accept_queue.empty())
+	{
+		auto sock = listen->accept_queue.front();
+		listen->accept_queue.pop();
+		closeTransmission(sock);
+	}
+}
+
+void TCPAssignment::closeTransmission(TCPSocket *sock)
+{
+	assert(sock->trans);
+
+	transmitPacket(sock, make_packet(sock, FIN, nullptr, 0), 1);
+
+	if(sock->state == ST_ESTAB)
+		sock->state = ST_FIN_WAIT_1;
+	else
+		sock->state = ST_LAST_ACK;
 }
 
 
@@ -925,15 +1036,217 @@ TCPAssignment::ListenModule::~ListenModule()
 
 }
 
-TCPAssignment::TransmissionModule::TransmissionModule(size_t rcv_size) : rcv_size(rcv_size), unacked()
+TCPAssignment::PacketReader::PacketReader(Packet *packet) : packet(packet)
 {
+	uint8_t ihl_buffer;
+	uint16_t tot_buffer;
+	packet->readData(ip_start, &ihl_buffer, 1);
+	packet->readData(ip_start + 2, &tot_buffer, 2);
+	size_t ihl = (ihl_buffer & 0x0F) * 4;  /* Size of the IP header */
+	size_t tot_len = ntohs(tot_buffer);
+
+	this->tcp_start = ip_start + ihl;
+	uint8_t data_ofs_ns;
+	packet->readData(tcp_start + 12, &data_ofs_ns, 1);
+	this->data_start = tcp_start + (data_ofs_ns >> 4) * 4;
+	this->data_len = ip_start + tot_len - data_start;
+}
+TCPAssignment::PacketReader::~PacketReader()
+{
+
+}
+in_addr_t TCPAssignment::PacketReader::readIPAddress(bool src)
+{
+	uint32_t ip_buffer;
+	packet->readData(ip_start + (src ? 12 : 16), &ip_buffer, 4);
+	return (in_addr_t)ntohl(ip_buffer);
+}
+in_port_t TCPAssignment::PacketReader::readPort(bool src)
+{
+	uint16_t port_buffer;
+	packet->readData(tcp_start + (src ? 0 : 2), &port_buffer, 2);
+	return (in_port_t)ntohs(port_buffer);
+}
+void TCPAssignment::PacketReader::recvAddress(TCPContext &context)
+{
+	context.local_addr = pack_addr(readIPAddress(false), readPort(false));
+	context.remote_addr = pack_addr(readIPAddress(true), readPort(true));
+}
+uint32_t TCPAssignment::PacketReader::readSeqNum()
+{
+	uint32_t seq_num;
+	packet->readData(tcp_start + 4, &seq_num, 4);
+	return ntohl(seq_num);
+}
+uint32_t TCPAssignment::PacketReader::readAckNum()
+{
+	uint32_t ack_num;
+	packet->readData(tcp_start + 8, &ack_num, 4);
+	return ntohl(ack_num);
+}
+uint16_t TCPAssignment::PacketReader::readFlag()
+{
+	uint16_t flag;
+	packet->readData(tcp_start + 12, &flag, 2);
+	return ntohs(flag) & 0x01FF;
+}
+size_t TCPAssignment::PacketReader::readWindowSize()
+{
+	uint16_t rwnd;
+	packet->readData(tcp_start + 14, &rwnd, 2);
+	return (size_t)ntohs(rwnd);
+}
+size_t TCPAssignment::PacketReader::readData(size_t offset, void *buf, size_t count)
+{
+	return packet->readData(data_start + offset, buf, count);
+}
+size_t TCPAssignment::PacketReader::getDataLen()
+{
+	return data_len;
+}
+size_t TCPAssignment::PacketReader::getSegmentLen()
+{
+	size_t len = getDataLen();
+	uint16_t flag = readFlag();
+	if(flag & SYN)
+		len++;
+	if(flag & FIN)
+		len++;
+	return len;
+}
+uint32_t TCPAssignment::PacketReader::getNextSeqNum()
+{
+	return readSeqNum() + getSegmentLen();
+}
+
+TCPAssignment::PacketWriter::PacketWriter(Packet *packet,
+		size_t ihl, size_t thl, size_t data_len) : packet(packet), data_len(data_len)
+{
+	assert(!(ihl & 3));
+	assert(!(thl & 3));
+
+	this->tcp_start = ip_start + ihl;
+	this->data_start = tcp_start + thl;
+}
+TCPAssignment::PacketWriter::~PacketWriter()
+{
+
+}
+void TCPAssignment::PacketWriter::writeIPAddress(bool src, in_addr_t ip)
+{
+	uint32_t ip_buffer = (uint32_t)htonl(ip);
+	packet->writeData(ip_start + (src ? 12 : 16), &ip_buffer, 4);
+}
+void TCPAssignment::PacketWriter::writePort(bool src, in_port_t port)
+{
+	uint16_t port_buffer = (uint16_t)htons(port);
+	packet->writeData(tcp_start + (src ? 0 : 2), &port_buffer, 2);
+}
+void TCPAssignment::PacketWriter::sendAddress(TCPContext &context)
+{
+	in_addr_t local_ip, remote_ip;
+	in_port_t local_port, remote_port;
+	std::tie(local_ip, local_port) = unpack_addr(context.local_addr);
+	std::tie(remote_ip, remote_port) = unpack_addr(context.remote_addr);
+	writeIPAddress(true, local_ip);
+	writeIPAddress(false, remote_ip);
+	writePort(true, local_port);
+	writePort(false, remote_port);
+}
+void TCPAssignment::PacketWriter::writeSeqNum(uint32_t seq_num)
+{
+	seq_num = htonl(seq_num);
+	packet->writeData(tcp_start + 4, &seq_num, 4);
+}
+void TCPAssignment::PacketWriter::writeAckNum(uint32_t ack_num)
+{
+	ack_num = htonl(ack_num);
+	packet->writeData(tcp_start + 8, &ack_num, 4);
+}
+void TCPAssignment::PacketWriter::writeFlag(uint16_t flag)
+{
+	/* Note: every TCP packet should have at least one flag set.
+	   Thus, it is safe to write data offset here, since this
+	   function will be called at least once. */
+	assert(!(flag & 0xFE00));
+
+	uint16_t data_ofs_word = (data_start - tcp_start) / 4;
+	flag |= data_ofs_word << 12;
+	flag = htobe16(flag);
+	packet->writeData(tcp_start + 12, &flag, 2);
+}
+void TCPAssignment::PacketWriter::writeWindowSize(size_t rwnd)
+{
+	uint16_t rwnd_buf = htons((uint16_t)rwnd);
+	packet->writeData(tcp_start + 14, &rwnd_buf, 2);
+}
+size_t TCPAssignment::PacketWriter::writeData(size_t offset, const void *buf, size_t count)
+{
+	return packet->writeData(data_start + offset, buf, count);
+}
+void TCPAssignment::PacketWriter::writeChecksum()
+{
+	uint32_t src_ip_nb, dest_ip_nb;
+	size_t data_ofs = data_start - tcp_start;
+	uint8_t *tcp_buffer = new uint8_t[data_ofs + data_len];
+	packet->readData(ip_start + 12, &src_ip_nb, 4);
+	packet->readData(ip_start + 16, &dest_ip_nb, 4);
+	packet->readData(tcp_start, tcp_buffer, data_ofs + data_len);
+	uint16_t checksum = NetworkUtil::tcp_sum(src_ip_nb, dest_ip_nb, tcp_buffer, data_ofs + data_len);
+	checksum = ~checksum;
+	checksum = htons(checksum);
+	packet->writeData(tcp_start + 16, &checksum, 2);
+	delete tcp_buffer;
+}
+
+TCPAssignment::TransmissionModule::TransmissionModule(size_t rcv_size) : in_flight(), rcv_size(rcv_size), unacked()
+{
+	this->seq_num = rand_seq_num();
+	this->mss = 512;	/* Default in KENS. */
+	this->ssthresh = RWND_MAX;
+	this->cwnd = 1 * this->mss;
+	this->timeout = TimeUtil::makeTime(100, TimeUtil::MSEC);
+	this->estimate_rtt = (Real)this->timeout;
+	this->dev_rtt = 0.0;
+
 	this->rcv_buf = new uint8_t[rcv_size];
 	this->awnd = rcv_size;
 	this->rcv_base = 0;
+	this->fin_rcvd = false;
 }
 TCPAssignment::TransmissionModule::~TransmissionModule()
 {
 	delete[] rcv_buf;
+}
+uint32_t TCPAssignment::TransmissionModule::getLastAcked()
+{
+	return in_flight.empty() ? seq_num : in_flight.front()->seq;
+}
+void TCPAssignment::TransmissionModule::calcTimeout(Time current)
+{
+	Time sample_rtt = current - in_flight.front()->sent;
+	estimate_rtt = (1 - alpha) * estimate_rtt + alpha * sample_rtt;
+	dev_rtt = (1 - beta) * dev_rtt + beta * abs(sample_rtt - estimate_rtt);
+	timeout = (Time)ceil(estimate_rtt + 4 * dev_rtt);
+}
+void TCPAssignment::TransmissionModule::increaseCWND()
+{
+	if(ssthresh > cwnd)
+		cwnd *= 2;
+	else
+		cwnd = std::min(cwnd + mss, RWND_MAX);
+}
+void TCPAssignment::TransmissionModule::decreaseCWND()
+{
+	ssthresh = std::max(cwnd / 2, mss * 2);
+	cwnd = ssthresh;
+}
+size_t TCPAssignment::TransmissionModule::senderAvailable()
+{
+	size_t wnd = std::min(rwnd, cwnd);
+	uint32_t last_ack = getLastAcked();
+	size_t used = seq_num >= last_ack ? seq_num - last_ack : SEQ_MAX - seq_num + last_ack;
+	return wnd >= used ? wnd - used : 0;
 }
 size_t TCPAssignment::TransmissionModule::readData(void *buf, size_t count)
 {
@@ -966,35 +1279,40 @@ size_t TCPAssignment::TransmissionModule::readData(void *buf, size_t count)
 		return actual_size;
 	}
 }
-bool TCPAssignment::TransmissionModule::inSegment(uint32_t seq_begin, uint32_t seq_end, uint32_t seq)
-{
-	if(seq_end < seq_begin)
-		return seq >= seq_begin || seq <= seq_end;
-	else
-		return seq >= seq_begin && seq <= seq_end;
-}
 bool TCPAssignment::TransmissionModule::inRcvdWindow(uint32_t seq)
 {
-	return inSegment(ack_num - AWND_MAX, ack_num + awnd, seq);
+	return inSegment(ack_num - RWND_MAX, ack_num + awnd, seq);
 }
-bool TCPAssignment::TransmissionModule::isValidSegment(uint32_t seq, size_t count)
+bool TCPAssignment::TransmissionModule::isValidSegment(uint32_t seq, size_t seg_len)
 {
-	return count <= awnd && inRcvdWindow(seq) && inRcvdWindow(seq + count);
+	uint32_t seq_begin = ack_num;
+	uint32_t seq_end = fin_rcvd ? fin_seq : ack_num + awnd;
+	if(awnd > 0)
+	{
+		if(seg_len > 0)
+		{
+			return inSegment(seq_begin, seq_end - 1, seq)
+			       || inSegment(seq_begin, seq_end - 1, seq + seg_len - 1);
+		}
+		else
+			return inSegment(seq_begin, seq_end - 1, seq);
+	}
+	else
+		return seg_len == 0 && seq_begin == seq;
 }
-void TCPAssignment::TransmissionModule::recvData(uint32_t seq, const void *buf, size_t count)
+void TCPAssignment::TransmissionModule::recvData(PacketReader &reader)
 {
-	if(unacked.find(seq) != unacked.end() || inSegment(ack_num - AWND_MAX, ack_num - 1, seq))
-		return;
-
+	uint32_t seq = reader.readSeqNum();
+	size_t count = reader.getDataLen();
 	size_t seq_diff = seq >= ack_num ? seq - ack_num : SEQ_MAX - ack_num + seq;
 	size_t data_pos = (rcv_base + seq_diff) % rcv_size;
 	size_t rest_size = rcv_size - data_pos;
 	if (count <= rest_size)
-		memcpy(rcv_buf + data_pos, buf, count);
+		reader.readData(0, rcv_buf + data_pos, count);
 	else
 	{
-		memcpy(rcv_buf + data_pos, buf, rest_size);
-		memcpy(rcv_buf, (uint8_t *)buf + rest_size, count - rest_size);
+		reader.readData(0, rcv_buf + data_pos, rest_size);
+		reader.readData(rest_size, rcv_buf, count - rest_size);
 	}
 
 	if(ack_num == seq)
@@ -1080,10 +1398,27 @@ int TCPAssignment::PCBEntry::getpid()
 	return this->pid;
 }
 
+TCPAssignment::TimerPayload::TimerPayload(enum TCPTimer type)
+{
+	this->type = type;
+}
+TCPAssignment::TimerPayload::~TimerPayload()
+{
+
+}
+
 
 uint32_t TCPAssignment::rand_seq_num()
 {
 	return rand();
+}
+
+bool TCPAssignment::inSegment(uint32_t seq_begin, uint32_t seq_end, uint32_t seq)
+{
+	if(seq_end < seq_begin)
+		return seq >= seq_begin || seq <= seq_end;
+	else
+		return seq >= seq_begin && seq <= seq_end;
 }
 
 std::pair<in_addr_t, in_port_t> TCPAssignment::unpack_addr(sockaddr addr)
