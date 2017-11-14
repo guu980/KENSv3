@@ -54,7 +54,7 @@ TCPAssignment::~TCPAssignment()
 
 void TCPAssignment::initialize()
 {
-	srand(time(NULL));
+	srand(0xa3bc53e0);
 }
 
 void TCPAssignment::finalize()
@@ -122,7 +122,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	PacketReader reader(packet);
 	TCPContext context;
 	reader.recvAddress(context);
-	//	fprintf(stderr, "Packet Hello: %u %hu\n", unpack_addr(context.remote_addr).first, unpack_addr(context.remote_addr).second);
 
 	in_addr_t ip;
 	in_port_t port;
@@ -169,7 +168,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				assert(listen_sock && sock->trans);
 
 				assert(trans->in_flight.empty());
-
 				sock->state = ST_ESTAB;
 				listen_sock->listen->pending_map.erase(context);
 
@@ -193,6 +191,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				}
 				else
 					listen_sock->listen->accept_queue.push(sock);
+				trans->cwnd = trans->mss;
 			}
 			break;
 
@@ -326,7 +325,7 @@ void TCPAssignment::timerCallback(void* payload)
 	switch(load->type)
 	{
 	case TM_RETRANSMIT:
-		retransmit(load);
+		retransmit(load, false);
 		break;
 	case TM_PERSISTENCE:
 		break;
@@ -846,6 +845,11 @@ void TCPAssignment::transmitPacket(TCPSocket *sock, Packet *packet, size_t seg_l
 
 	trans->in_flight.push(payload);
 	trans->seq_num += seg_len;
+	if(trans->rtt_passed)
+	{
+		trans->rtt_passed = false;
+		trans->rt_start_seq = trans->seq_num;
+	}
 }
 
 void TCPAssignment::recvPacket(TCPSocket *sock, PacketReader &reader)
@@ -867,43 +871,56 @@ void TCPAssignment::recvPacket(TCPSocket *sock, PacketReader &reader)
 	if((flag & ACK) && !in_flight.empty())
 	{
 		uint32_t ack = reader.readAckNum();
-		if(ack == trans->getLastAcked())
+		if(inSegment(trans->getLastAcked(), trans->seq_num, ack))
 		{
-			if(seg_len == 0 && trans->rwnd == reader.readWindowSize())
+			if(!trans->rtt_passed && inSegment(trans->rt_start_seq, trans->seq_num, ack))
 			{
-				trans->dup_ack_cnt++;
-				if(trans->dup_ack_cnt == 3)
-				{
-					/* Fast retransmit. */
-					auto payload = in_flight.front();
-					clearTimeout(payload->timerUUID);
-					retransmit(payload);
-					for(int i = 0; i < 3; i++)
-						trans->increaseCWND();
-				}
-				else if(trans->dup_ack_cnt > 3)
+				trans->calcTimeout(this->getHost()->getSystem()->getCurrentTime());
+				//fprintf(stderr, "Fuck this seq & ack: %u %u\n", trans->seq_num, ack);
+				//fprintf(stderr, "WTF is this RTT: %s msec\n\n", TimeUtil::printTime(trans->timeout, TimeUtil::MSEC).c_str());
+				trans->rtt_passed = true;
+				if(trans->cwnd >= trans->ssthresh)
 					trans->increaseCWND();
 			}
-			trans->rwnd = reader.readWindowSize();
-		}
-		else if(inSegment(trans->getLastAcked() + 1, trans->seq_num, ack))
-		{
-			trans->calcTimeout(this->getHost()->getSystem()->getCurrentTime());
 
-			while(!in_flight.empty()
-			      && inSegment(trans->getLastAcked() + 1, trans->seq_num, ack))
+			if(ack == trans->getLastAcked())
 			{
-				auto payload = in_flight.front();
-				in_flight.pop();
-				clearTimeout(payload->timerUUID);
-				packet_set.erase(payload->packet);
-				this->freePacket(payload->packet);
-				delete payload;
+				if(seg_len == 0 && trans->rwnd == reader.readWindowSize())
+				{
+					trans->dup_ack_cnt++;
+					if(trans->dup_ack_cnt == 3)
+					{
+						/* Fast retransmit. */
+						auto payload = in_flight.front();
+						clearTimeout(payload->timerUUID);
+						retransmit(payload, true);
+						for(int i = 0; i < 3; i++)
+							trans->increaseCWND();
+					}
+					else if(trans->dup_ack_cnt > 3)
+						trans->increaseCWND();
+				}
+				trans->rwnd = reader.readWindowSize();
 			}
+			else
+			{
+				while(!in_flight.empty()
+				      && inSegment(trans->getLastAcked() + 1, trans->seq_num, ack))
+				{
+					auto payload = in_flight.front();
+					in_flight.pop();
+					clearTimeout(payload->timerUUID);
+					packet_set.erase(payload->packet);
+					this->freePacket(payload->packet);
+					delete payload;
 
-			trans->increaseCWND();
-			trans->rwnd = reader.readWindowSize();
-			trans->dup_ack_cnt = 0;
+					if(trans->cwnd < trans->ssthresh)
+						trans->increaseCWND();
+				}
+
+				trans->rwnd = reader.readWindowSize();
+				trans->dup_ack_cnt = 0;
+			}
 		}
 	}
 
@@ -956,7 +973,7 @@ void TCPAssignment::listenPacket(TCPSocket *sock, PacketReader &reader)
 	}
 }
 
-void TCPAssignment::retransmit(TimerPayload *payload)
+void TCPAssignment::retransmit(TimerPayload *payload, bool fast)
 {
 	/* TCP Reno: Always set CWND to SSTHRESH. */
 	assert(payload->type == TM_RETRANSMIT);
@@ -966,7 +983,7 @@ void TCPAssignment::retransmit(TimerPayload *payload)
 
 	auto sock = payload->sock;
 	assert(sock->trans);
-	sock->trans->decreaseCWND();
+	sock->trans->decreaseCWND(fast);
 }
 
 void TCPAssignment::resetConnection(TCPContext &context, uint32_t seq_num, uint32_t ack_num)
@@ -1204,10 +1221,12 @@ TCPAssignment::TransmissionModule::TransmissionModule(size_t rcv_size) : in_flig
 	this->seq_num = rand_seq_num();
 	this->mss = 512;	/* Default in KENS. */
 	this->ssthresh = RWND_MAX;
+	this->rtt_passed = true;
 	this->cwnd = 1 * this->mss;
-	this->timeout = TimeUtil::makeTime(100, TimeUtil::MSEC);
-	this->estimate_rtt = (Real)this->timeout;
-	this->dev_rtt = 0.0;
+	this->timeout = TimeUtil::makeTime(1, TimeUtil::SEC);
+	this->estimate_rtt = (Real)TimeUtil::makeTime(100, TimeUtil::MSEC);
+	this->dev_rtt = (Real)TimeUtil::makeTime(50, TimeUtil::MSEC);
+	this->dup_ack_cnt = 0;
 
 	this->rcv_buf = new uint8_t[rcv_size];
 	this->awnd = rcv_size;
@@ -1228,24 +1247,25 @@ void TCPAssignment::TransmissionModule::calcTimeout(Time current)
 	estimate_rtt = (1 - alpha) * estimate_rtt + alpha * sample_rtt;
 	dev_rtt = (1 - beta) * dev_rtt + beta * abs(sample_rtt - estimate_rtt);
 	timeout = (Time)ceil(estimate_rtt + 4 * dev_rtt);
+	//fprintf(stderr, "RTT: %s msec\n", TimeUtil::printTime(sample_rtt, TimeUtil::MSEC).c_str());
 }
 void TCPAssignment::TransmissionModule::increaseCWND()
 {
-	if(ssthresh > cwnd)
-		cwnd *= 2;
-	else
-		cwnd = std::min(cwnd + mss, RWND_MAX);
+	cwnd = std::min(cwnd + mss, RWND_MAX);
 }
-void TCPAssignment::TransmissionModule::decreaseCWND()
+void TCPAssignment::TransmissionModule::decreaseCWND(bool fast)
 {
 	ssthresh = std::max(cwnd / 2, mss * 2);
-	cwnd = ssthresh;
+	if(fast)
+		cwnd = ssthresh;
+	else
+		cwnd = 1 * mss;
 }
 size_t TCPAssignment::TransmissionModule::senderAvailable()
 {
 	size_t wnd = std::min(rwnd, cwnd);
 	uint32_t last_ack = getLastAcked();
-	size_t used = seq_num >= last_ack ? seq_num - last_ack : SEQ_MAX - seq_num + last_ack;
+	size_t used = seq_num >= last_ack ? seq_num - last_ack : SEQ_MAX - last_ack + seq_num;
 	return wnd >= used ? wnd - used : 0;
 }
 size_t TCPAssignment::TransmissionModule::readData(void *buf, size_t count)

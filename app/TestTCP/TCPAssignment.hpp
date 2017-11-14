@@ -195,6 +195,8 @@ private:
 		size_t rwnd;	/* Receiver window size. */
 		size_t cwnd;	/* Congestion window size. */
 		size_t ssthresh;	/* Slow start threshold. */
+		uint32_t rt_start_seq;
+		bool rtt_passed;
 		Real estimate_rtt;	/* Estimated RTT in nanoseconds. */
 		Real dev_rtt;		/* Deviation RTT in nanoseconds. */
 		Time timeout;		/* Timeout in nanoseconds. */
@@ -230,7 +232,7 @@ private:
 		uint32_t getLastAcked();
 		void calcTimeout(Time current);
 		void increaseCWND();
-		void decreaseCWND();
+		void decreaseCWND(bool fast);
 		size_t senderAvailable();
 
 		bool inRcvdWindow(uint32_t seq);
@@ -261,7 +263,7 @@ private:
 	void transmitPacket(TCPSocket *sock, Packet *packet, size_t seg_len);
 	void recvPacket(TCPSocket *sock, PacketReader &reader);
 	void listenPacket(TCPSocket *sock, PacketReader &reader);
-	void retransmit(TimerPayload *payload);
+	void retransmit(TimerPayload *payload, bool fast);
 	void resetConnection(TCPContext &context, uint32_t seq_num, uint32_t ack_num);
 
 	void closeListen(TCPSocket *sock);
